@@ -1,0 +1,274 @@
+/* ── Material 3 配色（浅紫 / 基准紫）────────────────────────
+   直接采用 M3 官方基准紫主题（m3.material.io 自己用的那套），角色名与
+   规范一一对应：primary=P40、primary-container=P90、surface=N98、
+   surface-container 逐级 N96/94/92/90、on-surface-variant=NV30、
+   outline=NV50、outline-variant=NV80。
+   我另外用 OKLCH 的 tone 推导做过交叉验证，与官方值每通道只差 2~4，
+   所以换主色调时用任意 M3 主题生成器（Material Theme Builder）
+   以新种子色导出一套同名角色替换本块即可，粒度是对得上的。
+   分层一律用色调（tonal elevation）：没有模糊、没有装饰性阴影。
+
+   注意：下面这组 `--md-*` 是**主题的令牌定义**（M3 的完整角色集），
+   不是「有用到才写」的组件样式。个别角色当前没有组件引用是正常的
+   （例如 tertiary 这组是留给「需要与主色区分的次要信息」的），
+   不要当成死代码删掉 —— 删了以后新组件就只能手挑颜色了。 */
+:root {
+  /* primary：主操作、选中态 */
+  --md-primary: #6750A4;
+  --md-on-primary: #FFFFFF;
+  --md-primary-container: #EADDFF;
+  --md-on-primary-container: #21005D;
+  /* secondary：次级按钮、标签、分段按钮的选中段 */
+  --md-secondary: #625B71;
+  --md-on-secondary: #FFFFFF;
+  --md-secondary-container: #E8DEF8;
+  --md-on-secondary-container: #1D192B;
+  /* tertiary：需要与主色区分开的次要信息（暖玫瑰） */
+  --md-tertiary: #7D5260;
+  --md-on-tertiary: #FFFFFF;
+  --md-tertiary-container: #FFD8E4;
+  --md-on-tertiary-container: #31111D;
+  /* error */
+  --md-error: #B3261E;
+  --md-on-error: #FFFFFF;
+  --md-error-container: #F9DEDC;
+  --md-on-error-container: #410E0B;
+  /* surface 与 surface-container：页面层级全靠这一组（都带一点紫调） */
+  --md-surface: #FEF7FF;
+  --md-on-surface: #1D1B20;
+  --md-surface-variant: #E7E0EC;
+  --md-on-surface-variant: #49454F;
+  --md-surface-container-lowest: #FFFFFF;
+  --md-surface-container-low: #F7F2FA;
+  --md-surface-container: #F3EDF7;
+  --md-surface-container-high: #ECE6F0;
+  --md-surface-container-highest: #E6E0E9;
+  /* outline：1px 描边与分隔线都用它 */
+  --md-outline: #79747E;
+  --md-outline-variant: #CAC4D0;
+  --md-inverse-surface: #322F35;
+  --md-inverse-on-surface: #F5EFF7;
+  /* 交互态：M3 的 hover/pressed 都是在底色上叠 8%/12% 状态层，
+     这里直接给出叠好之后的实色，免得 CSS 里做颜色混合。
+     按钮默认走浅色（tonal）填充，所以状态层也按 tonal 算。 */
+  --md-tonal-hover: #D8CEE8;
+  --md-tonal-active: #D0C6DF;
+  --md-outline-hover: #F3F1F8;
+  --md-outline-active: #EDEAF4;
+  --md-error-hover: #F9EEED;
+  --md-nav-hover: #ECE5ED;
+  --md-row-hover: #F6F4FA;
+  /* 分段按钮的段间分隔线：把 outline-variant 再淡化到近白 ——
+     默认那档（#CAC4D0）在浅紫底上仍然太显眼 */
+  --md-nav-divider: #E7E5EA;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; color: var(--md-on-surface);
+  /* M3 正文字阶 body-medium 14/20 */
+  font: 14px/1.45 -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--md-surface);
+}
+.wrap { max-width: 980px; margin: 0 auto; padding: 24px 16px 72px; }
+/* M3 outlined card：实底 + 1px outline-variant，无模糊、无装饰性阴影 */
+.panel {
+  background: var(--md-surface-container-lowest);
+  border: 1px solid var(--md-outline-variant); border-radius: 16px; padding: 20px;
+  margin-bottom: 16px;
+}
+/* 顶栏用 surface-container-low，做出 M3 top app bar 的层次 */
+.appbar { background: var(--md-surface-container-low); border-color: transparent; }
+/* 登录面板：就两个字段，不需要 980px 那么宽，收成一张居中窄卡 */
+.panel.narrow { max-width: 380px; margin: 8vh auto 16px; }
+/* M3 字阶：title-large / title-medium */
+h1 { font-size: 22px; font-weight: 400; margin: 0; }
+h2 { font-size: 16px; font-weight: 500; margin: 0 0 14px; }
+.muted { color: var(--md-on-surface-variant); font-size: 13px; }
+.err { color: var(--md-error); font-size: 13px; }
+.ok  { color: var(--md-primary); font-size: 13px; }
+
+/* M3 snackbar：成功用 inverse-surface，出错用 error-container。
+   以前提示只是两行彩色小字，混在顶栏里几乎看不见；
+   但也不该铺满一整条 —— 收成一条轻量的浮动提示。 */
+.toast {
+  display: inline-block; max-width: min(100%, 520px);
+  margin: 12px 0 0; padding: 12px 16px; border-radius: 8px;
+  background: var(--md-inverse-surface); color: var(--md-inverse-on-surface);
+  font-size: 13px;
+}
+.toast.err { background: var(--md-error-container); color: var(--md-on-error-container); }
+
+/* logo：直接用 APP 图标；图标自带奶油底，在白卡上留一条发丝线才「立」得住 */
+img.logo { display: block; border-radius: 10px; border: 1px solid var(--md-outline-variant); }
+img.logo.sm { width: 28px; height: 28px; border-radius: 8px; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.login-head { text-align: center; margin-bottom: 20px; }
+.login-head img.logo { width: 72px; height: 72px; margin: 0 auto 14px; border-radius: 18px; }
+
+/* 导航 = M3 segmented button group（分段按钮组，即 button-groups 那个组件）：
+   一组首尾相连的按钮，只有选中那一段用 secondary-container 填充。
+   窄屏放不下时横向滚动而不是换行 —— 换行会把「连成一组」的样子打断。 */
+nav {
+  display: flex; width: fit-content; max-width: 100%;
+  flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none;
+  border: 1px solid var(--md-outline); border-radius: 17px;
+  margin-bottom: 20px;
+}
+nav::-webkit-scrollbar { display: none; }
+nav button {
+  /* 段内只有文字 + 一个绝对定位的对勾：对勾**不在流内**，
+     所以标签由左右对称的 padding 居中，跟选不选中无关，
+     切换时也不会有任何位移。左右 padding 要始终对称。 */
+  position: relative;
+  display: inline-flex; align-items: center;
+  flex: 0 0 auto; height: 34px; border: none; border-radius: 0;
+  /* 段间分隔线用极浅的一档：默认的 outline 在浅紫底上过于抢眼 */
+  border-left: 1px solid var(--md-nav-divider); background: none;
+  color: var(--md-on-surface-variant); padding: 0 22px;
+  font-size: 13px; font-weight: 500;
+}
+nav button:first-child { border-left: none; }
+nav button:hover:not([disabled]) { background: var(--md-nav-hover); }
+nav button.on {
+  background: var(--md-secondary-container); color: var(--md-on-secondary-container);
+  /* M3 规格：紧邻选中段的分隔线要藏起来，否则选中胶囊会与相邻段「断线」 */
+  border-left-color: transparent;
+}
+nav button.on:hover:not([disabled]) { background: var(--md-tonal-hover); }
+nav button.on + button { border-left-color: transparent; }
+
+/* 选中段的对勾：绝对定位压在左侧留白里，**不参与布局**，故尺寸与有无都不影响段宽。
+   必须每个 tab 都渲染、未选中时只是 invisible：
+     - 只在选中项渲染 → 图标进出流会让它后面的 tab 位移；
+     - 改在流内留位 → 单侧空位会让左右留白不对称。 */
+svg.tick {
+  /* left = (22 的左侧留白 − 12 的图标) / 2：让对勾在左侧留白里居中，
+     即到段左边界与到文字的距离都是 5px。改了 padding 或图标尺寸要同步改这里。 */
+  position: absolute; left: 5px; top: 50%; transform: translateY(-50%);
+  width: 12px; height: 12px; fill: currentColor;
+}
+nav button:not(.on) svg.tick { visibility: hidden; }
+
+label { display: block; margin-bottom: 14px; }
+label > span {
+  display: block; font-size: 12px; font-weight: 500;
+  color: var(--md-on-surface-variant); margin-bottom: 6px;
+}
+/* M3 outlined text field：1px outline；聚焦时 outline 转 primary 并加粗到 2px */
+input[type=text], input[type=password], input[type=number], select {
+  width: 100%; padding: 10px 12px; font-size: 14px; color: var(--md-on-surface);
+  border: 1px solid var(--md-outline); border-radius: 4px;
+  background: var(--md-surface-container-lowest);
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+input[type=text]:hover, input[type=password]:hover, input[type=number]:hover, select:hover {
+  border-color: var(--md-on-surface);
+}
+input[type=text]:focus, input[type=password]:focus, input[type=number]:focus, select:focus {
+  outline: none; border-color: var(--md-primary);
+  /* 用内阴影补到 2px：符合 M3 的聚焦描边，又不会让元素尺寸跳动 */
+  box-shadow: inset 0 0 0 1px var(--md-primary);
+}
+input::placeholder { color: var(--md-on-surface-variant); opacity: .7; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 16px; }
+
+/* ── 表单排版 ──────────────────────────────────────────────
+   字段按语义分区（账号 / 权限与目录 / 头像），每区两列，避免五个字段
+   摊在一张自动换行的网格里、宽窄不一。 */
+.form-block { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--md-outline-variant); }
+.form-section { margin-bottom: 20px; }
+.form-section > h3 {
+  font-size: 12px; font-weight: 600; letter-spacing: .06em;
+  color: var(--md-primary); margin: 0 0 12px;
+}
+.form-hint { color: var(--md-on-surface-variant); font-size: 12px; margin: -6px 0 0; }
+.form-actions {
+  display: flex; gap: 8px; align-items: center;
+  margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--md-outline-variant);
+}
+
+/* 头像：直接把图片摆出来点选，而不是对着 01..12 猜 */
+.avatars { display: flex; flex-wrap: wrap; gap: 8px; }
+.avatar-pick {
+  height: auto; padding: 0; background: none; box-shadow: none; line-height: 0;
+  border: 1px solid var(--md-outline-variant); border-radius: 50%; cursor: pointer;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.avatar-pick:hover:not([disabled]) { background: none; border-color: var(--md-outline); }
+/* M3 选中态：primary 细环 + 一层 primary-container 作为留白 */
+.avatar-pick.on { border-color: var(--md-primary); box-shadow: 0 0 0 3px var(--md-primary-container); }
+.avatar-pick img { display: block; width: 44px; height: 44px; border-radius: 50%; }
+img.avatar-sm { display: block; width: 30px; height: 30px; border-radius: 50%; }
+
+/* M3 filled tonal button：浅紫底 + 深字，比实心紫轻一档。
+   想换回高强调的实心紫，把底色改成 --md-primary / --md-on-primary 即可。 */
+button {
+  padding: 0 20px; height: 36px; border-radius: 18px; border: none;
+  background: var(--md-secondary-container); color: var(--md-on-secondary-container);
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: background .15s ease;
+}
+button:hover:not([disabled]) { background: var(--md-tonal-hover); }
+button:active:not([disabled]) { background: var(--md-tonal-active); }
+/* M3 的禁用态：on-surface 12% 底 + 38% 文字 */
+button[disabled] {
+  background: var(--md-surface-container-highest); color: var(--md-on-surface);
+  opacity: .38; cursor: not-allowed;
+}
+button.block { width: 100%; }
+/* M3 outlined button */
+button.ghost {
+  background: none; color: var(--md-primary);
+  border: 1px solid var(--md-outline); box-shadow: none;
+}
+button.ghost:hover:not([disabled]) { background: var(--md-outline-hover); }
+button.ghost:active:not([disabled]) { background: var(--md-outline-active); }
+/* M3 outlined button，error 语义 */
+button.danger {
+  background: none; color: var(--md-error);
+  border: 1px solid var(--md-error); box-shadow: none;
+}
+button.danger:hover:not([disabled]) { background: var(--md-error-hover); }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+/* 底部留出间距：表格后面的「新增挂载点 / 新增用户」按钮原来紧贴最后一行 */
+table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 16px; }
+th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--md-outline-variant); }
+th { color: var(--md-on-surface-variant); font-weight: 600; font-size: 12px; }
+tbody tr:hover { background: var(--md-row-hover); }
+/* 操作列：表头与按钮一起右对齐；按钮横排并留出间距，避免挤成一团 */
+.actions { white-space: nowrap; text-align: right; }
+.acts { display: inline-flex; align-items: center; gap: 4px; }
+/* 表格里的操作按 M3 文字按钮处理：无底色无描边，靠 primary 文字与交互态 */
+td.actions button {
+  height: 30px; padding: 0 11px; font-size: 13px; border-radius: 15px;
+  background: none; color: var(--md-primary); border: none;
+}
+td.actions button:hover:not([disabled]) { background: var(--md-outline-hover); }
+td.actions button.danger { background: none; color: var(--md-error); border: none; }
+td.actions button.danger:hover:not([disabled]) { background: var(--md-error-hover); }
+/* M3 chip */
+.tag {
+  display: inline-block; padding: 3px 10px; border-radius: 8px; font-size: 12px;
+  background: var(--md-secondary-container); color: var(--md-on-secondary-container);
+}
+.tag.off { background: var(--md-surface-container-highest); color: var(--md-on-surface-variant); }
+
+/* 每个文件一行 + 一条进度条 */
+.file { border-top: 1px solid var(--md-outline-variant); padding: 12px 0; }
+.file-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* M3 linear progress：4px 轨道 + primary 指示条 */
+.bar { height: 4px; border-radius: 2px; overflow: hidden; background: var(--md-surface-variant); }
+.bar > i { display: block; height: 100%; width: 0;
+          background: var(--md-primary); transition: width .12s linear; }
+
+/* 封面图画布：画布内部分辨率固定在 1280×720（落盘尺寸），
+   这里只做等比缩放，小屏上也能整块看见。 */
+.cover-canvas {
+  display: block; width: 100%; height: auto; margin-bottom: 16px;
+  border: 1px solid var(--md-outline-variant); border-radius: 12px;
+  background: var(--md-surface-variant);
+}
+/* 背景图选择框：跟其它 label 一样占满一行，但别把文件按钮撑到整行宽 */
+.form-section input[type=file] { margin-top: 6px; font-size: 13px; }

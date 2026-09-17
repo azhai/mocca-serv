@@ -1,0 +1,66 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+bin/
+*.out
+
+# Logs
+*.log
+logs/
+
+# Dependency directories
+node_modules/
+vendor/
+
+# Go workspace file
+go.work
+optimized-rules.txt
+
+# Database
+*.csv
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+
+# Environment variables
+.air.test.toml
+.air.toml
+.env
+
+# Repository storage
+dist/
+docs/superpowers/
+projs/
+repos/
+uploads/
+
+# IDE
+.ai-memory/findings.md
+.ai-memory/progress.md
+.ai-memory/task_plan.md
+.arts/
+.codearts/
+.codebuddy/
+.idea/
+.planning/
+.superpowers/
+.trae/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+tmp/

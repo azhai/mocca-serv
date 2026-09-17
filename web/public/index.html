@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mocca 管理后台</title>
+<!-- 图标即 APP 图标：64px 的做 favicon（4.5KB），256px 的给登录页与顶栏用 -->
+<link rel="icon" type="image/png" sizes="64x64" href="logo-64.png" />
+<link rel="apple-touch-icon" href="logo.png" />
+<meta name="theme-color" content="#FEF7FF" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="wrap" id="app"></div>
+
+<!-- 依赖随二进制一起分发：mithril 与本文件同级，不走 CDN。
+     局域网 http 访问（非安全上下文）+ 断网场景都必须能用后台。 -->
+<script type="module" src="app.js"></script>
+</body>
+</html>
