@@ -43,6 +43,10 @@ func main() {
 	}
 	defer func() { _ = models.Close() }()
 
+	// 挂载点聚合树常驻内存：启动时先建一次，之后由存储的增删改触发重建。
+	// 树里只有挂载点的层级关系，真实目录与文件依然是每次列目录现读驱动。
+	models.RefreshMountTree()
+
 	// 一次性自救子命令：把某个账号的口令重设为指定值，然后退出。
 	// 必须先连上库才能查到账号，所以放在这里而不是程序最前面。
 	if len(os.Args) > 1 && os.Args[1] == "passwd" {
@@ -72,15 +76,15 @@ func main() {
 
 	routes.SetupAPIRoutes(root)
 
-	// 管理后台是可选能力，由构建标签决定：
-	//   make full / go build ./        → 带上后台，挂到 /admin
-	//   make api  / go build -tags noweb → web.Register 是空操作，不注册任何 /admin 路由
+	// 页面是可选能力，由构建标签决定：
+	//   make full / go build ./        → 带上页面：浏览应用挂 /，后台挂 /admin/
+	//   make api  / go build -tags noweb → web.Register 是空操作，不注册任何页面路由
 	// 两种构建共用一个 main，差异全部收在 web 包里（见 web/embed.go 与 web/noweb.go）。
 	if web.Embedded {
 		if err := web.Register(root, "/admin"); err != nil {
-			log.Fatalf("挂载管理后台失败: %+v", errors.WithStack(err))
+			log.Fatalf("挂载页面失败: %+v", errors.WithStack(err))
 		}
-		log.Printf("管理后台已挂载：%s/admin/", cfg.Addr)
+		log.Printf("浏览应用已挂载：%s/ （管理后台在 %s/admin/）", cfg.Addr, cfg.Addr)
 	} else {
 		log.Printf("纯 API 构建（-tags noweb）：不含管理后台，仅提供 REST API 与 passwd 子命令")
 	}

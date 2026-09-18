@@ -263,6 +263,15 @@ td.actions button.danger:hover:not([disabled]) { background: var(--md-error-hove
 .bar > i { display: block; height: 100%; width: 0;
           background: var(--md-primary); transition: width .12s linear; }
 
+/* 后台顶栏里指向浏览应用（/）的链接：外观与 ghost 按钮一致，
+   但它是整页跳转的 <a>，所以单独给一份样式。 */
+a.browse-link {
+  display: inline-flex; align-items: center; height: 36px; padding: 0 20px;
+  border-radius: 18px; border: 1px solid var(--md-outline);
+  color: var(--md-primary); text-decoration: none; font-size: 14px;
+}
+a.browse-link:hover { background: var(--md-outline-hover); }
+
 /* 封面图画布：画布内部分辨率固定在 1280×720（落盘尺寸），
    这里只做等比缩放，小屏上也能整块看见。 */
 .cover-canvas {

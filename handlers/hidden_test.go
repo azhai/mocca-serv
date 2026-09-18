@@ -135,25 +135,27 @@ func TestFsListExcludesDotAndReservedNames(t *testing.T) {
 		}
 	}
 
-	// 顺序必须与原始列表一致：os.ReadDir 按名字升序，排除项本来散在前后 ——
-	// 「顺序一致」同时证明了这是剔除而非截断或重排。
-	// 期望值按上面的硬编码清单推导，不在测试里复刻一遍实现规则，否则两边会一起错。
-	raw, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	excluded := make(map[string]bool, len(excludedEntries()))
-	for _, n := range excludedEntries() {
-		excluded[n] = true
-	}
-	want := make([]string, 0, len(raw))
-	for _, d := range raw {
-		if !excluded[d.Name()] {
-			want = append(want, d.Name())
-		}
+	// 展示顺序：目录 → 视频 → 音频 → 图片 → 文本 → 其它，每组内按忽略大小写的名字序。
+	// 这里把期望顺序**硬编码**出来，不复刻实现里的排序规则 —— 实现改错时两边才会一起错。
+	// 未加挂载点（只挂了 /media），所以这一层没有虚拟挂载点条目。
+	want := []string{
+		// 目录（sub 与 sub2 也是唯一两个目录）
+		"sub", "sub2",
+		// 视频 .mp4
+		"#1 Hits.mp4", "$RECYCLE.BIN.mp4", "%off.mp4", "&amp;tag.mp4", "*待定.mp4",
+		"?what.mp4", "^caret.mp4", "a#b.mp4", "C++入门.mp4", "movie.mp4", "zz.mp4",
+		"爱在黎明破晓前.mp4", "神偷奶爸！.mp4",
+		// 音频 .mp3
+		"!important.mp3",
+		// 图片 .png
+		"@2x.png",
+		// 文本 .txt
+		"System Volume Information.txt",
+		// 其它：无扩展名与未知扩展名
+		"lost+found2", "Thumbs.db.bak",
 	}
 	if !reflect.DeepEqual(names, want) {
-		t.Errorf("列表内容或顺序被改动\n got = %v\nwant = %v", names, want)
+		t.Errorf("列表内容或顺序不符\n got = %v\nwant = %v", names, want)
 	}
 
 	// total 必须与过滤后的 content 一致，不能还按原始条数报

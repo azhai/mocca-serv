@@ -69,6 +69,7 @@ system environment variables with a `MOCCA_` prefix. Precedence: built-in defaul
 - **Media metadata** — title, duration, cover, description and multiple authors per item; video / audio / image kinds.
 - **Cover maker** — the admin console draws a 1280×720 cover on a canvas and stores it under `<data-dir>/.mocca/covers/` (full build only).
 - **Admin console** (full build only) — embedded, works offline over plain HTTP on your LAN: storages, users, metadata, folder passwords and batch upload with one progress bar per file.
+- **Browse app** (`/`) — collapsible directory tree, list/grid views, in-page audio and video player, and a full-screen image viewer with zoom; breadcrumbs plus in-folder search.
 - **Accounts & permissions** — admin / user / guest; a user only ever sees its own `base_path`; 12 preset avatars (uploading images is not supported, by design).
 - **Folder passwords** — set once on a parent folder and the whole subtree, streaming included, requires it; stored as bcrypt.
 - **Comments, danmaku, favorites** — comments are unlimited, danmaku are capped at 50 characters and sorted by playback time, favorites are de-duplicated per user.

@@ -98,7 +98,7 @@ func TestEnsureAdminRejectsEmptyPassword(t *testing.T) {
 func TestEnsureAdminIsIdempotent(t *testing.T) {
 	openTestDB(t)
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		created, err := EnsureAdmin(testPwd)
 		if err != nil {
 			t.Fatalf("第 %d 次 EnsureAdmin 失败: %v", i+1, err)

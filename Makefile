@@ -26,7 +26,7 @@ GOBUILD   = go build -trimpath -ldflags="$(LDFLAGS)"
 
 # ── 目标 ──────────────────────────────────────────────────
 
-.PHONY: all api full build-api build-full run run-api server clean test cover lint tidy
+.PHONY: all api web build-api build-full run run-api server clean test cover lint tidy
 
 ## api: 纯 API 版（本机平台）—— 无管理后台、无封面图制作
 api:
@@ -35,9 +35,9 @@ api:
 	CGO_ENABLED=0 $(GOBUILD) -tags $(TAG_API) -o bin/$(APP_API) ./
 	@echo "✅ $(APP_API) 已生成（含 passwd 子命令）"
 
-## full: 完整版（本机平台）—— 带管理后台与封面图制作
-full:
-	@echo "Build $(APP) (full: API + admin UI + cover maker) ..."
+## web: 完整版（本机平台）—— 带管理后台与封面图制作
+web:
+	@echo "Build $(APP) (web: API + admin UI + cover maker) ..."
 	mkdir -p bin
 	CGO_ENABLED=0 $(GOBUILD) -o bin/$(APP) ./
 	@echo "✅ $(APP) 已生成（管理后台在 /admin/）"
@@ -69,7 +69,7 @@ build-full:
 	@echo "✅ 完整版交叉编译完成"
 
 ## all: 交叉编译两个版本的全平台产物
-all: clean api full build-api build-full
+all: clean api web build-api build-full
 
 ## run: 本机直接跑完整版（前端是普通 JS/CSS，随二进制内嵌，无需额外构建步骤）
 run:
@@ -80,7 +80,7 @@ run-api:
 	go run -tags $(TAG_API) ./
 
 ## server: 编译完整版并启动
-server: full
+server: web
 	./bin/$(APP)
 
 ## clean: 清理构建产物

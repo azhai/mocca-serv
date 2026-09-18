@@ -3,18 +3,21 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Mocca 管理后台</title>
-<!-- 图标即 APP 图标：64px 的做 favicon（4.5KB），256px 的给登录页与顶栏用 -->
-<link rel="icon" type="image/png" sizes="64x64" href="logo-64.png" />
-<link rel="apple-touch-icon" href="logo.png" />
+<title>Mocca 浏览</title>
+<!-- 图标与脚本都放在 public 根下的固定位置（/logo*.png、/css/、/js/），
+     所以这里一律写绝对路径：本页在 /，后台页在 /admin/，相对路径会解析到不同目录。 -->
+<link rel="icon" type="image/png" sizes="64x64" href="/logo-64.png" />
+<link rel="apple-touch-icon" href="/logo.png" />
 <meta name="theme-color" content="#FEF7FF" />
-<link rel="stylesheet" href="styles.css" />
+<!-- styles.css 只提供 M3 主题令牌与基础元素样式，布局由 home.css 负责 -->
+<link rel="stylesheet" href="/css/styles.css" />
+<link rel="stylesheet" href="/css/home.css" />
 </head>
 <body>
-<div class="wrap" id="app"></div>
+<div id="app"></div>
 
-<!-- 依赖随二进制一起分发：mithril 与本文件同级，不走 CDN。
-     局域网 http 访问（非安全上下文）+ 断网场景都必须能用后台。 -->
-<script type="module" src="app.js"></script>
+<!-- 依赖随二进制一起分发：脚本都在 /js/ 下，不走 CDN。
+     局域网 http 访问（非安全上下文）+ 断网场景都必须能用。 -->
+<script type="module" src="/js/home.js"></script>
 </body>
 </html>

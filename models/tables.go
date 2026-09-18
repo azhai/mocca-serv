@@ -64,6 +64,9 @@ func Open(dbFile string) (*Database, error) {
 		return nil, err
 	}
 	dbSchema = s
+	// 换了一个库就等于换了一套挂载点：旧库的聚合树必须丢掉，
+	// 否则新库第一次列目录会看到上一个库的挂载点。
+	InvalidateMountTree()
 	return s, nil
 }
 

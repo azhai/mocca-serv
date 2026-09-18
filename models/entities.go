@@ -29,15 +29,28 @@ type Setting struct {
 }
 
 func CreateStorage(s *Storage) error {
+	// 挂载点在这里统一规范化：开头补斜线、末尾去斜线（`media/` → `/media`）。
+	// 放在 models 而不是 handler，是为了让任何调用方（含测试、未来的导入功能）
+	// 都不可能往库里写进未规范化的路径。
+	s.MountPath = NormalizeMountPath(s.MountPath)
 	if s.Modified.IsZero() {
 		s.Modified = time.Now()
 	}
-	return errors.WithStack(GetSchema().Storage.Insert().One(s))
+	if err := GetSchema().Storage.Insert().One(s); err != nil {
+		return errors.WithStack(err)
+	}
+	InvalidateMountTree()
+	return nil
 }
 
 func UpdateStorage(s *Storage) error {
+	s.MountPath = NormalizeMountPath(s.MountPath)
 	s.Modified = time.Now()
-	return errors.WithStack(GetSchema().Storage.Save().One(s))
+	if err := GetSchema().Storage.Save().One(s); err != nil {
+		return errors.WithStack(err)
+	}
+	InvalidateMountTree()
+	return nil
 }
 
 func GetStorageByMountPath(path string) (*Storage, error) {
@@ -75,7 +88,11 @@ func ListStorages() ([]*Storage, error) {
 }
 
 func DeleteStorage(id uint) error {
-	return errors.WithStack(GetSchema().Storage.Delete().Where("id = ?", id).Exec())
+	if err := GetSchema().Storage.Delete().Where("id = ?", id).Exec(); err != nil {
+		return errors.WithStack(err)
+	}
+	InvalidateMountTree()
+	return nil
 }
 
 func GetSetting(key string) (*Setting, error) {

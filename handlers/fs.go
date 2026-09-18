@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -38,6 +39,9 @@ type MediaObj struct {
 	Modified string `json:"modified"`
 	Thumb    string `json:"thumb"`
 	Type     int    `json:"type"`
+	// Mount 标记这一条是**挂载点**（由挂载点聚合树虚拟出来的目录），
+	// 不是存储里的真实目录。客户端据此换一个图标，别让用户以为两者是一回事。
+	Mount bool `json:"mount,omitempty"`
 	// Sign 受保护路径的签名。当前用「目录密码 + 令牌」保护，
 	// 故恒为空；保留字段是为了让 APP 的 `sign` 解析路径始终有值可选。
 	Sign string `json:"sign"`
@@ -115,6 +119,44 @@ func openStorage(reqPath string) (drivers.Driver, string, error) {
 		return nil, "", err
 	}
 	return drv, rel, nil
+}
+
+// resolveStorageStrict 只认「路径确实落在某个挂载点之内」的情况：最长前缀匹配，
+// 不做任何兜底。用来区分两种路径 ——
+//   - 属于某个存储的真实路径（例如 /media/movies）；
+//   - 只是聚合树上的中间节点（例如只挂了 /media 时的根路径 /）。
+func resolveStorageStrict(reqPath string) (*models.Storage, string, error) {
+	reqPath = ensureLeadingSlash(reqPath)
+
+	storages, err := models.ListStorages()
+	if err != nil {
+		return nil, "", errors.WithStack(err)
+	}
+	var best *models.Storage
+	bestMount := ""
+	for _, s := range storages {
+		if s.Disabled {
+			continue
+		}
+		// 逐个按规范化后的挂载点比较：即使库里存着历史的不规范写法也不会漏配
+		mount := models.NormalizeMountPath(s.MountPath)
+		// 根挂载点天然是任何路径的前缀，但只在没有更长的匹配时才用它
+		if mount != "/" && reqPath != mount && !strings.HasPrefix(reqPath, mount+"/") {
+			continue
+		}
+		if best == nil || len(mount) > len(bestMount) {
+			best, bestMount = s, mount
+		}
+	}
+	if best == nil {
+		return nil, "", errors.New("路径不属于任何挂载点")
+	}
+
+	rel := strings.TrimPrefix(reqPath, bestMount)
+	if rel == "" {
+		rel = "/"
+	}
+	return best, rel, nil
 }
 
 // objType 判定条目类型。
@@ -201,6 +243,10 @@ func guessType(name string) int {
 }
 
 // FsList 列目录。
+//
+// 返回的 content 由两部分拼成：
+//  1. 挂载点聚合树给出的虚拟目录（models 内存树，只含挂载点层级，**永远排最前**）；
+//  2. 真实条目 —— 只有路径确实落在某个挂载点之内时，才去读那个存储。
 func FsList(c *echo.Context) error {
 	var req ListReq
 	if err := c.Bind(&req); err != nil {
@@ -214,31 +260,44 @@ func FsList(c *echo.Context) error {
 	if err != nil {
 		return helpers.Fail(c, helpers.CodeUnauthorized, err.Error())
 	}
-	req.Path = scoped
 
 	// 目录密码先于存储访问校验，避免未授权就触碰后端
-	if err := requireFolderPassword(req.Path, req.Password); err != nil {
+	if err := requireFolderPassword(scoped, req.Password); err != nil {
 		return helpers.Fail(c, helpers.CodeForbidden, err.Error())
 	}
 
-	drv, rel, err := openStorage(req.Path)
+	objs, err := listDir(models.NormalizeMountPath(scoped))
 	if err != nil {
 		return helpers.Fail(c, helpers.CodeNotFound, err.Error())
 	}
-	defer func() { _ = drv.Close() }()
+	// total 取过滤后的条数，与 content 保持一致
+	return helpers.OK(c, map[string]any{"content": objs, "total": len(objs)})
+}
 
-	entries, err := drv.List(rel)
-	if err != nil {
-		return helpers.Fail(c, helpers.CodeNotFound, "目录不存在")
+// listDir 组装一层目录的条目：挂载点在最前，其后是排序过的真实条目。
+func listDir(dir string) ([]MediaObj, error) {
+	// 挂载点条目只来自内存里的聚合树：带 mount 标记，客户端才能与真实目录区分开
+	mounts := models.MountChildren(dir)
+	objs := make([]MediaObj, 0, len(mounts)+16)
+	for _, name := range mounts {
+		objs = append(objs, MediaObj{Name: name, IsDir: true, Type: models.MediaDir, Mount: true})
 	}
-	// 首字符特殊的条目直接剔除，不做任何重排：顺序仍是驱动返回的原始顺序。
-	// 用 append 而非预分配下标，是为了「只跳过、不移动」。
-	objs := make([]MediaObj, 0, len(entries))
+
+	entries, err := realEntries(dir, len(mounts) > 0)
+	if err != nil {
+		return nil, err
+	}
+	isMount := make(map[string]bool, len(mounts))
+	for _, name := range mounts {
+		isMount[name] = true
+	}
+	rest := make([]MediaObj, 0, len(entries))
 	for _, e := range entries {
-		if isExcludedName(e.Name) {
+		// 同名时挂载点优先：同一个名字在一层里只能出现一次
+		if isMount[e.Name] {
 			continue
 		}
-		objs = append(objs, MediaObj{
+		rest = append(rest, MediaObj{
 			Name:     e.Name,
 			Size:     e.Size,
 			IsDir:    e.IsDir,
@@ -246,8 +305,76 @@ func FsList(c *echo.Context) error {
 			Type:     objType(e.Name, e.IsDir),
 		})
 	}
-	// total 取过滤后的条数，与 content 保持一致
-	return helpers.OK(c, map[string]any{"content": objs, "total": len(objs)})
+	sortObjs(rest)
+
+	// 挂载点已按名字排好（聚合树保证），真实条目接在后面
+	return append(objs, rest...), nil
+}
+
+// realEntries 读这一层的真实条目（点开头与系统保留名在这一层就剔除）。
+//
+//	路径落在某个挂载点之内         → 读那个挂载点，相对路径 = 去掉挂载点前缀
+//	不在任何挂载点内、但这一层有挂载点 → 不读存储：这一层是纯虚拟的（例如根层）
+//	两者都不满足                   → 退回最长挂载点兜底，保持历史路径可用
+func realEntries(dir string, hasMounts bool) ([]drivers.Entry, error) {
+	st, rel, err := resolveStorageStrict(dir)
+	if err != nil {
+		if hasMounts {
+			return nil, nil
+		}
+		if st, rel, err = resolveStorage(dir); err != nil {
+			return nil, err
+		}
+	}
+	drv, err := drivers.Open(st)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = drv.Close() }()
+
+	entries, err := drv.List(rel)
+	if err != nil {
+		return nil, errors.New("目录不存在")
+	}
+	out := make([]drivers.Entry, 0, len(entries))
+	for _, e := range entries {
+		if isExcludedName(e.Name) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out, nil
+}
+
+// sortObjs 真实条目的展示顺序：目录在前，其后按文件类型分组
+// （视频 → 音频 → 图片 → 文本 → 其它），每组内按名字的字母序。
+func sortObjs(objs []MediaObj) {
+	sort.SliceStable(objs, func(i, j int) bool {
+		a, b := objs[i], objs[j]
+		if a.IsDir != b.IsDir {
+			return a.IsDir
+		}
+		if ra, rb := fileRank(a.Type), fileRank(b.Type); ra != rb {
+			return ra < rb
+		}
+		return models.LessName(a.Name, b.Name)
+	})
+}
+
+// fileRank 文件的分组顺序。目录（type=0）走另一条分支，不会到这里。
+func fileRank(t int) int {
+	switch t {
+	case models.MediaVideo:
+		return 0
+	case models.MediaAudio:
+		return 1
+	case models.MediaImage:
+		return 2
+	case models.MediaText:
+		return 3
+	default: // unknown(1) 等一律归到「其它」
+		return 4
+	}
 }
 
 // FsGet 取对象详情，raw_url 可直接交给播放器。

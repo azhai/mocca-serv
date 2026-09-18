@@ -53,7 +53,7 @@
         ▼                               ▼                               ▼
 ┌─────────────────┐           ┌──────────────────┐          ┌─────────────────────┐
 │ middlewares/    │           │ handlers/        │          │ web/（仅完整版）     │
-│ BodyLimit       │           │ 请求绑定与校验    │          │ /admin/ 静态后台     │
+│ BodyLimit       │           │ 请求绑定与校验    │          │ 页面 / 与 /admin/    │
 │ RequestLogger   │           │ 调用 models/     │          │ go:embed all:public │
 │ AuthMiddleware  │           │ drivers，封装信封 │          └─────────────────────┘
 │ AdminMiddleware │           └────────┬─────────┘
@@ -80,6 +80,7 @@
 | 中间件 | `middlewares/` | 请求体上限、访问日志、登录/管理员校验、取流鉴权 |
 | 处理器 | `handlers/` | 绑定与校验请求、调用 models 与 drivers、用 `helpers.OK/Fail` 封装信封 |
 | 领域模型 | `models/` | 表结构与业务规则：用户、存储、设置、收藏、元数据、作者、评论 |
+| 挂载点聚合树 | `models/mounts.go` | 常驻内存：**只存挂载点层级**（真实目录与文件不进树），存储增删改时重建 |
 | 驱动 | `drivers/` | 具体存储读写；新增一种存储 = 实现 `Driver` 接口，handler 不用改 |
 | 工具 | `helpers/` | 统一响应信封（`OK` / `Fail` / `FailStatus`）与 JWT 签发解析 |
 | 后台 | `web/` | 管理后台静态资源（唯一可选能力，可编译期剥离） |
@@ -91,9 +92,11 @@ BodyLimit(1GB) → RequestLogger → OptionalAuth(解析令牌，写 user_id)
    → handlers.FsList
         ├─ scopePath        普通用户收敛到 base_path，越界直接拒
         ├─ requireFolderPassword   目录密码（bcrypt 比对），不通过就不碰存储
-        ├─ resolveStorage   按挂载点最长匹配选出存储 + 存储内相对路径
-        ├─ drivers.Open     建驱动实例（本地或 SMB 连接池）
-        ├─ drv.List         取条目；点开头与系统保留名在这里被过滤
+        ├─ listDir          先取挂载点聚合树给出的虚拟挂载点（永远排最前）
+        │    └─ realEntries 只有路径真的落在挂载点内才读存储（resolveStorageStrict）
+        │         ├─ drivers.Open  建驱动实例（本地或 SMB 连接池）
+        │         └─ drv.List      取真实条目；点开头与系统保留名在这里被过滤
+        ├─ sortObjs         目录 → 文件（按类型分组），组内忽略大小写的名字序
         └─ helpers.OK       { "content": [...], "total": N }
 ```
 
@@ -159,14 +162,36 @@ Range 的全部语义都白送，且是被广泛验证过的实现：
 - **没有断点续传的服务端状态**：续传完全由客户端的 `Range` 表达，服务端无状态；
 - 播放逻辑与下载逻辑是同一条路径（同一个端点），没有区别对待。
 
-### 3.4 挂载点解析
+### 3.4 挂载点聚合树与两种解析
 
-`resolveStorage` 的规则（`handlers/fs.go`）：
+内存里有一棵**只含挂载点**的层级树（`models/mounts.go`）：
 
-1. 跳过 `disabled` 的挂载点；
-2. 取**最长前缀匹配**的挂载点（`/media/2026` 优先于 `/media`）；
-3. 没有匹配时退回到「挂载点路径最长的那个」，这样单挂载点部署下任意路径都能落到它上面；
-4. 一个挂载点都没有 → `code: 404`、`尚未配置存储，请先添加挂载点`。
+- 由存储表的 `mount_path` 聚合而来，**不保存任何真实目录与文件** —— 它们每次列目录现读驱动，
+  因此存储内容怎么变都不需要失效，只有挂载点增删改才会重建；
+- 只挂 `/nas/movies` 时，树里会出现 `/` → `nas`、`/nas` → `movies` 两级（中间层是补出来的）；
+- `disabled: true` 的挂载点不进树；挂载点在保存时就被规范化（`media/` → `/media`）；
+- `CreateStorage` / `UpdateStorage` / `DeleteStorage` 会标记失效，下次读时惰性重建；
+  `main.go` 启动时预热一次。
+
+列目录时两种解析并存（`handlers/fs.go`）：
+
+| 函数 | 语义 | 用在哪 |
+| --- | --- | --- |
+| `resolveStorageStrict` | 只认「路径真的落在某个挂载点之内」，最长前缀匹配（`/media/2026` 优先于 `/media`），**不兜底** | `fs/list`：判断这一层有没有真实内容 |
+| `resolveStorage` | 同上，但匹配不上时退回「挂载点路径最长」的那个存储 | `fs/get`、`fs/remove`、`fs/rename`、`fs/move`、取流；以及 `fs/list` 里「既不在挂载点内、这一层也没有挂载点」的历史路径 |
+
+于是 `fs/list` 的三种情形是：路径在挂载点内 → 挂载点条目 + 真实条目；
+路径只是聚合树上的节点（例如 `/`、`/nas`）→ 只有挂载点条目；
+两者都不是 → 走兜底解析。一个挂载点都没有时返回 `code: 404`、`尚未配置存储，请先添加挂载点`。
+
+聚合树虚拟出来的条目会带 **`"mount": true`**（`handlers.MediaObj.Mount`）：它和普通目录一样是
+`is_dir: true` / `type: 0`，但它是**另一个存储的入口**，客户端据此换图标（浏览应用用的是
+「存储设备」图标与暖赭色，与文件夹明显区分）。真实条目不带这个键（`omitempty`）。
+
+展示顺序（`sortObjs` / `fileRank`）：**挂载点 → 目录 → 文件按类型分组**
+（视频 → 音频 → 图片 → 文本 → 其它），组内按名字排序且**忽略大小写**
+（`models.LessName`，仅大小写不同时按原始字节序兜底）。详细规则见
+[`API.md` §4.1](./API.md#41-列目录)。
 
 移动（`/api/fs/move`）要求来源与目标解析到**同一个存储**：跨存储没有廉价实现，
 宁可直接拒绝，也不做「看起来成功其实是慢速拷贝」。
@@ -276,14 +301,14 @@ srv := &http.Server{
 | 产物 | `bin/mocca` | `bin/mocca-api` |
 | REST API（`/api/*`）与取流（`/d/*`） | 有 | 有（同一套路由，一字不改） |
 | `passwd` 子命令 | 有 | 有 |
-| 管理后台 `/admin/` | 有（内嵌，含封面图制作） | **无**：`web/public/` 不参与编译 |
+| 页面（浏览应用 `/` 与后台 `/admin/`） | 有（内嵌，含封面图制作） | **无**：`web/public/` 不参与编译 |
 | `POST /api/meta/cover`（封面图落盘） | 有 | **无**：处理器被换成一句说明 |
 
 ### 5.1 标签落在哪些文件
 
 | 文件 | 构建标签 | 作用 |
 | --- | --- | --- |
-| `web/embed.go` | `!noweb` | `//go:embed all:public`；`Embedded = true`；注册 `/admin` 路由 |
+| `web/embed.go` | `!noweb` | `//go:embed all:public`；`Embedded = true`；注册 `/`（浏览应用）与 `/admin/`（后台）路由 |
 | `web/noweb.go` | `noweb` | `Embedded = false`；`FS()` 返回错误；`Register()` 是空操作 |
 | `handlers/cover_admin.go` | `!noweb` | 封面图落盘：写入 `<data-dir>/.mocca/covers/` |
 | `handlers/cover_api.go` | `noweb` | 同名处理器，只回「本构建不含此功能」 |
@@ -294,16 +319,43 @@ srv := &http.Server{
 
 ```go
 if web.Embedded {
-	web.Register(root, "/admin") // 完整版：挂上静态后台
+	web.Register(root, "/admin") // 完整版：浏览应用挂 /，后台挂 /admin/
 } else {
-	// 纯 API 版：什么都不挂，/admin/* 与其它未命中路径一样走进默认 404
+	// 纯 API 版：什么都不挂，/ 与 /admin/* 和其它未命中路径一样走进默认 404
 }
 ```
 
 **路由表在两种构建里完全一致**：`/api/meta/cover` 无条件注册，差异收在处理器实现里。
 于是 `routes/` 不需要任何 build tag，也不会出现「改了路由忘了同步另一个版本」。
 
-### 5.2 实测差异（`-ldflags="-s -w"`，macOS arm64）
+### 5.2 页面入口（完整版）
+
+| 地址 | 内容 |
+| --- | --- |
+| `/` | 浏览应用首页（`index.html`，由 `Register` 直接写出，不经文件服务器） |
+| `/admin/` | 管理后台首页（`admin/index.html`，由 `Register` 直接写出） |
+| `/admin` | 302 到 `/admin/`（规范入口） |
+| `/admin/index.html` | 被 `http.FileServer` 规范化 301 到 `/admin/` |
+| `/css/*`、`/js/*`、`/logo*.png` | 静态资源：文件服务器从 `public/` 根提供 |
+
+两个页面共用同一套 `css/` 与 `js/`，目录布局如下：
+
+```text
+public/
+├── index.html          浏览应用（/）
+├── admin/index.html    管理后台（/admin/）
+├── css/                styles.css、home.css
+├── js/                 app.js、home.js、mithril.js、static-hash.js
+└── logo*.png           APP 图标
+```
+
+页面里一律用**绝对路径**引用资源（`/css/styles.css`、`/js/app.js`）：后台页在 `/admin/` 下，
+写相对路径会被解析成 `/admin/css/styles.css` 而 404。
+
+目录请求（结尾带 `/` 又不是 `/` 与 `/admin/` 这两个入口的）一律 404：否则 `css/` 与 `js/`
+里没有 `index.html`，`http.FileServer` 会回一份**目录列表**，把内嵌资源全列出来。
+
+### 5.3 实测差异（`-ldflags="-s -w"`，macOS arm64）
 
 | | 完整版 | 纯 API 版 |
 | --- | --- | --- |
@@ -311,11 +363,11 @@ if web.Embedded {
 | 含 HTML / CSS / JS | 是 | **否** |
 | 可制作封面图 | 是 | **否** |
 
-后台是手写的轻量 SPA（mithril + `app.js` + `styles.css`，合计约 200KB），
-**因此纯 API 版省下的体积很小**。它的价值在暴露面：二进制里没有任何 HTML/JS，
-也没有往数据目录写文件的封面图接口。
+两个页面都是手写的轻量 SPA（mithril + `app.js` + `home.js` + `styles.css` + `home.css`，
+合计约 165KB），**因此纯 API 版省下的体积很小**。它的价值在暴露面：二进制里没有任何
+HTML/JS，也没有往数据目录写文件的封面图接口。
 
-### 5.3 怎么验证剥离确实生效
+### 5.4 怎么验证剥离确实生效
 
 ```bash
 make api
@@ -354,7 +406,7 @@ ADDR=:8000
 DATA_DIR=/srv/mocca/data
 JWT_SECRET=换成随机串
 EOF
-./bin/mocca        # 完整版：后台在 http://<host>:8000/admin/
+./bin/mocca        # 完整版：浏览应用 http://<host>:8000/ ，后台 http://<host>:8000/admin/
 ```
 
 | 特性 | 说明 |
@@ -406,7 +458,7 @@ EOF
 | `Range` 透传 | Nginx 默认透传；**切勿开启响应缓冲**（`proxy_buffering off`），否则拖动进度会卡顿 |
 | 请求体大小 | 上传端点需放开 `client_max_body_size`（服务端单请求上限 1 GB） |
 | 超时 | `proxy_read_timeout` 需大于最长播放时长（长连接持续读） |
-| 子路径部署 | 目前路由前缀固定（API 为 `/api`，取流为 `/d`，后台为 `/admin`）；子路径场景请在反代上改写前缀 |
+| 子路径部署 | 目前路由前缀固定（API 为 `/api`，取流为 `/d`，页面为 `/` 与 `/admin`）；子路径场景请在反代上改写前缀 |
 
 Nginx 片段：
 
@@ -438,6 +490,7 @@ location / {
 | 取流 | 每个请求一个句柄 | 本地存储 = 1 个文件描述符；SMB 走连接池，按需复用 |
 | 上传 | 每个文件一次请求 | 前端最多 3 个并发，逐个文件给独立进度 |
 | 数据库 | **单个 SQLite 文件** | 纯 Go 驱动（`modernc.org/sqlite`，无 CGO）；写操作是串行的 |
+| 挂载点聚合树 | 常驻内存，**只含挂载点层级** | 存储增删改时重建；真实目录与文件不入树，所以存储内容变化不需要任何失效 |
 | 内容缓存 | **没有** | 不缓存文件内容：每个 Range 都直接向存储取数据，靠存储自身的随机读能力 |
 | 限速 / 连接数上限 | **没有** | 需要的话请在反向代理或操作系统层面做 |
 

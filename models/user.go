@@ -1,6 +1,7 @@
 package models
 
 import (
+	"slices"
 	"strings"
 	"time"
 
@@ -29,12 +30,7 @@ const DefaultAvatar = "01"
 
 // IsValidAvatar 判断头像是否为预设之一。
 func IsValidAvatar(key string) bool {
-	for _, p := range AvatarPresets {
-		if p == key {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(AvatarPresets, key)
 }
 
 // User 账号表。

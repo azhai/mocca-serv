@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Mocca 管理后台</title>
+<!-- 本页在 /admin/ 下，图标与脚本又都在 public 根（/logo*.png、/css/、/js/），
+     所以必须写绝对路径：写相对路径会解析成 /admin/css/styles.css 而 404。 -->
+<link rel="icon" type="image/png" sizes="64x64" href="/logo-64.png" />
+<link rel="apple-touch-icon" href="/logo.png" />
+<meta name="theme-color" content="#FEF7FF" />
+<link rel="stylesheet" href="/css/styles.css" />
+</head>
+<body>
+<div class="wrap" id="app"></div>
+
+<!-- 依赖随二进制一起分发：脚本都在 /js/ 下，不走 CDN。
+     局域网 http 访问（非安全上下文）+ 断网场景都必须能用后台。 -->
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>
