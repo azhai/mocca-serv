@@ -15,6 +15,7 @@ import (
 
 	"github.com/azhai/mocca/config"
 	"github.com/azhai/mocca/drivers"
+	"github.com/azhai/mocca/mediaindex"
 	"github.com/azhai/mocca/middlewares"
 	"github.com/azhai/mocca/models"
 	"github.com/azhai/mocca/routes"
@@ -54,6 +55,15 @@ func main() {
 		// 不该被一大坨调用栈淹掉（wrapped 的上下文已经够定位问题了）。
 		if err := resetPassword(os.Args[2:]); err != nil {
 			log.Fatalf("重置口令失败: %v", err)
+		}
+		return
+	}
+
+	// 一次性索引子命令：`mocca index [挂载点]`。对每个存储递归扫描，
+	// 在各目录生成 `.index.jsonl`；只做基础设施，海报/简介由外部工具写入 `.mocca`。
+	if len(os.Args) > 1 && os.Args[1] == "index" {
+		if err := runIndex(os.Args[2:]); err != nil {
+			log.Fatalf("生成索引失败: %v", err)
 		}
 		return
 	}
@@ -149,5 +159,40 @@ func resetPassword(args []string) error {
 		return err
 	}
 	log.Printf("已重置账号 %q 的口令，请立刻用新口令登录并妥善保管", *user)
+	return nil
+}
+
+// runIndex 实现 `mocca index [挂载点]`。不传挂载点则扫全部启用的存储；
+// 传了则只扫那一个（按规范化后的挂载点精确匹配）。
+func runIndex(args []string) error {
+	mount := ""
+	if len(args) > 0 {
+		mount = models.NormalizeMountPath(args[0])
+	}
+	storages, err := models.ListStorages()
+	if err != nil {
+		return err
+	}
+	scanned, files := 0, 0
+	for _, s := range storages {
+		if s.Disabled {
+			continue
+		}
+		if mount != "" && models.NormalizeMountPath(s.MountPath) != mount {
+			continue
+		}
+		n, err := mediaindex.ScanStorage(s)
+		if err != nil {
+			log.Printf("存储 %s 索引失败: %v", s.MountPath, err)
+			continue
+		}
+		scanned++
+		files += n
+		log.Printf("存储 %s 索引完成：%d 个媒体文件", s.MountPath, n)
+	}
+	if scanned == 0 {
+		return errors.New("没有可扫描的存储（挂载点不存在或全部被禁用）")
+	}
+	log.Printf("共扫 %d 个存储、%d 个媒体文件", scanned, files)
 	return nil
 }

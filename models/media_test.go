@@ -137,6 +137,65 @@ func TestMediaMetaFieldsByKind(t *testing.T) {
 	}
 }
 
+func TestMediaPeopleWithRoles(t *testing.T) {
+	openTestDB(t)
+
+	v := &MediaMeta{
+		Path: "/movies/role.mp4", Kind: MediaVideo, Size: 512, Title: "角色片",
+		Director: "王导", Year: 2024, Region: "中国大陆", Studio: "某某影业",
+		Description: "剧情简介",
+	}
+	if err := CreateMedia(v, []string{"主演甲"}); err != nil {
+		t.Fatalf("CreateMedia 失败: %v", err)
+	}
+
+	// 带角色人员：导演在前 + 两位主演（无角色）+ 出品方
+	people := []AuthorPerson{
+		{Name: "王导", Role: RoleDirector},
+		{Name: "主演甲", Role: ""},
+		{Name: "主演乙", Role: ""},
+		{Name: "某某影业", Role: RoleStudio},
+	}
+	if err := SetPeople(v.ID, people); err != nil {
+		t.Fatalf("SetPeople 失败: %v", err)
+	}
+	got, err := ListPeople(v.ID)
+	if err != nil {
+		t.Fatalf("ListPeople 失败: %v", err)
+	}
+	if len(got) != 4 || got[0].Role != RoleDirector || got[3].Role != RoleStudio || got[2].Name != "主演乙" {
+		t.Errorf("人员/角色/顺序不符: %+v", got)
+	}
+
+	// 音频角色分组：主唱/伴唱/演奏
+	if err = SetPeople(v.ID, []AuthorPerson{
+		{Name: "主唱甲", Role: RoleLead},
+		{Name: "伴唱乙", Role: RoleBacking},
+		{Name: "吉他丙", Role: RoleInstrument},
+	}); err != nil {
+		t.Fatalf("SetPeople 音频角色失败: %v", err)
+	}
+	gotA, _ := ListPeople(v.ID)
+	if len(gotA) != 3 || gotA[0].Role != RoleLead || gotA[1].Role != RoleBacking || gotA[2].Role != RoleInstrument {
+		t.Errorf("音频角色不符: %+v", gotA)
+	}
+
+	// 旧 SetAuthors 仍可用：内部转为无角色人员
+	meta, _ := GetMediaByPath("/movies/role.mp4")
+	if err = SetAuthors(meta.ID, []string{"旧演员"}); err != nil {
+		t.Fatalf("SetAuthors 失败: %v", err)
+	}
+	got2, _ := ListPeople(meta.ID)
+	if len(got2) != 1 || got2[0].Name != "旧演员" || got2[0].Role != "" {
+		t.Errorf("SetAuthors 兼容异常: %+v", got2)
+	}
+
+	// 附加信息落库可读回
+	if meta.Year != 2024 || meta.Director != "王导" || meta.Region != "中国大陆" || meta.Studio != "某某影业" {
+		t.Errorf("附加信息读取不符: %+v", meta)
+	}
+}
+
 func TestMediaRejectsBadInput(t *testing.T) {
 	openTestDB(t)
 

@@ -59,6 +59,13 @@ func MountChildren(p string) []string {
 	return loadMountTree().children[NormalizeMountPath(p)]
 }
 
+// IsMount 判断给定路径本身是不是某个挂载点（根挂载点也算，返回 true）。
+// 供上层在列目录时把「这个目录自己带着一个存储」这件事报给客户端，
+// 例如根被挂在存储上时，首页目录树的根节点才能长得像个挂载点。
+func IsMount(p string) bool {
+	return loadMountTree().mounts[NormalizeMountPath(p)]
+}
+
 // MountCount 当前生效（未禁用）的挂载点数量，主要用于日志与测试断言。
 func MountCount() int {
 	return len(loadMountTree().mounts)

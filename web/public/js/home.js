@@ -34,6 +34,8 @@ const I = {
   reset: 'M12 5V1L7 6l5 5V7a6 6 0 1 1-6 6H4a8 8 0 1 0 8-8z',
   // 在新标签页打开原图：预览层（浮动层）里看过后，想直接进浏览器看大图就用它
   open: 'M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7h-2v7zM14 3v2h3.59l-9.3 9.29 1.42 1.42L19 6.41V10h2V3h-7z',
+  // 笔：管理员编辑媒体信息的入口按钮
+  edit: 'M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z',
 };
 
 // 媒体类型，取值与 models/media.go 的 MediaKind 一一对应
@@ -55,6 +57,9 @@ const state = {
   player: null, // { kind:'audio'|'video', url, name }
   lb: null,   // 图片预览 { imgs:[{name,path}], i, zoom, x, y, url, loading }
   toast: '', toastErr: false,
+  isAdmin: false,  // /me 返回角色为管理员时为 true，据此显示媒体条目右上角的编辑钮
+  info: null,      // 音/视频悬浮信息层 { path, x, y, data, loading }
+  edit: null,      // 编辑弹窗 { path, name, description, director, cast, year, region, studio, loading }
   urlOf: new Map(), // 路径 → 可直接播放/预览的地址（服务端 raw_url 口径）
 };
 
@@ -195,6 +200,149 @@ function directURL(p) {
   return '/d' + encPath(p) + (s ? '?' + s : '');
 }
 
+// posterURL 拼 .mocca 海报图地址。令牌走查询串（<img> 带不了自定义头），
+// StreamAuth 会从查询串读 token；受保护目录的密码也一并带上。
+function posterURL(p) {
+  const q = new URLSearchParams();
+  q.set('path', normPath(p));
+  if (state.token) q.set('token', state.token);
+  const pw = pwdFor(p);
+  if (pw) q.set('password', pw);
+  return '/meta/poster?' + q.toString();
+}
+
+// stripNameExt 去掉文件扩展名（.mp4 之类），只留「可不含扩展名编辑」的部分。
+function stripNameExt(n) {
+  const i = n.lastIndexOf('.');
+  return i > 0 ? n.slice(0, i) : n;
+}
+
+/* ── 音/视频悬浮信息层 ─────────────────────────────── */
+// showInfo 打开悬浮层并拉 /fs/info：海报、简介、导演/主演/年份/地区/出品方一次拿全。
+async function showInfo(ev, p) {
+  if (state.edit) return;               // 编辑弹窗开着时别弹信息层
+  if (state.info && state.info.path === p) return;
+  state.info = { path: p, x: ev.clientX, y: ev.clientY, data: null, loading: true };
+  m.redraw();
+  try {
+    const body = { path: p };
+    const pw = pwdFor(p);
+    if (pw) body.password = pw;
+    const d = await api('/fs/info', { method: 'POST', body });
+    if (state.info && state.info.path === p) state.info.data = d;
+  } catch { /* 拉不到就静默关掉，不打断浏览 */ state.info = null; }
+  m.redraw();
+}
+
+/* ── 管理员编辑 ────────────────────────────────────── */
+// openEdit 打开编辑弹窗，先取现有元数据回填（避免白改覆盖）。
+// 表单字段随媒体类型变化：图片只留简介；音频用主唱/伴唱/演奏 + 语言；视频用导演/主演等。
+async function openEdit(e) {
+  const p = e.path || joinPath(state.path, e.name);
+  state.info = null;
+  state.edit = {
+    path: p, kind: e.type || KIND.video,
+    name: stripNameExt(e.name),
+    description: '', director: '', cast: '', year: '', region: '', studio: '',
+    language: '', lead: '', backing: '', instrument: '',
+    posterTS: 0, loading: true,
+  };
+  m.redraw();
+  try {
+    const body = { path: p };
+    const pw = pwdFor(p);
+    if (pw) body.password = pw;
+    const d = await api('/fs/info', { method: 'POST', body });
+    const meta = (d && d.meta) || {};
+    if (state.edit && state.edit.path === p) {
+      state.edit.name = meta.title || stripNameExt(e.name);
+      state.edit.description = meta.description || '';
+      state.edit.director = meta.director || '';
+      state.edit.cast = (meta.cast || []).join(', ');
+      state.edit.year = meta.year || '';
+      state.edit.region = meta.region || '';
+      state.edit.studio = meta.studio || '';
+      state.edit.language = meta.language || '';
+      state.edit.lead = (meta.lead || []).join(', ');
+      state.edit.backing = (meta.backing || []).join(', ');
+      state.edit.instrument = (meta.instrument || []).join(', ');
+      state.edit.loading = false;
+    }
+  } catch (err) { if (state.edit) state.edit.loading = false; say(err.message, true); }
+  m.redraw();
+}
+
+// saveEdit 提交编辑：改名 + 附加信息，成功后刷新当前目录。
+// 后端按 kind 落库，这里只把相关字段带上（后端会忽略无关的）。
+async function saveEdit() {
+  const ed = state.edit;
+  if (!ed || ed.loading) return;
+  ed.loading = true; m.redraw();
+  try {
+    await api('/fs/edit', { method: 'POST', body: {
+      path: ed.path,
+      name: ed.name.trim(),
+      description: ed.description,
+      director: ed.director.trim(),
+      cast: ed.cast.split(',').map(s => s.trim()).filter(Boolean),
+      year: parseInt(ed.year, 10) || 0,
+      region: ed.region.trim(),
+      studio: ed.studio.trim(),
+      language: ed.language.trim(),
+      lead: ed.lead.split(',').map(s => s.trim()).filter(Boolean),
+      backing: ed.backing.split(',').map(s => s.trim()).filter(Boolean),
+      instrument: ed.instrument.split(',').map(s => s.trim()).filter(Boolean),
+    } });
+    state.edit = null;
+    await openDir(state.path);
+  } catch (err) { if (state.edit) state.edit.loading = false; say(err.message, true); m.redraw(); }
+}
+
+// uploadCover 上传替换封面：直接吞图片字节 POST /fs/cov，成功后刷新预览。
+async function uploadCover(ed, file) {
+  if (!file) return;
+  try {
+    const buf = await file.arrayBuffer();
+    const q = new URLSearchParams({ path: normPath(ed.path) });
+    const res = await fetch('/api/fs/cov?' + q, {
+      method: 'POST', body: buf,
+      headers: state.token ? { Authorization: state.token } : {},
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!j || j.code !== 200) throw new Error((j && j.message) || '上传失败');
+    ed.posterTS = Date.now(); // 让海报预览强制重新加载新图
+    say('封面已更新');
+  } catch (err) { say(err.message, true); }
+  m.redraw();
+}
+
+// doShot 用 FFmpeg 截取视频指定秒数的帧作封面，成功后刷新预览。
+async function doShot(ed) {
+  if (ed.loading) return;
+  const sec = parseFloat(ed.shotSec) || 0;
+  ed.loading = true; m.redraw();
+  try {
+    await api('/fs/shot', { method: 'POST', body: { path: ed.path, sec } });
+    ed.posterTS = Date.now(); // 让封面预览强制重新加载新图
+    say('封面已从截图更新');
+  } catch (err) { say(err.message, true); }
+  ed.loading = false; m.redraw();
+}
+async function deleteFile() {
+  const ed = state.edit;
+  if (!ed || ed.loading) return;
+  // 二次确认：明确告知不可恢复（目录会递归删除，这里只删文件路径，必为单个文件）
+  const sure = window.confirm(`确定删除「${ed.name}」吗？此操作不可恢复。`);
+  if (!sure) return;
+  ed.loading = true; m.redraw();
+  try {
+    await api('/fs/remove', { method: 'POST', body: { path: ed.path } });
+    state.edit = null;
+    await openDir(state.path);
+    say('已删除');
+  } catch (err) { if (state.edit) state.edit.loading = false; say(err.message, true); m.redraw(); }
+}
+
 /* ── 目录导航 ─────────────────────────────────────────── */
 async function openDir(p) {
   const target = normPath(p);
@@ -241,9 +389,14 @@ async function loadKids(p) {
   n.loading = true; m.redraw();
   try {
     const d = await listDir(p);
+    // 目录自己是不是挂载点（根挂存储时根其实是个挂载点）也要记下来，
+    // 树的根节点才能据此画成挂载点形态。
+    n.mount = !!d.is_mount;
     // 树只放目录：文件在右侧列表里看。mount 一路带下去，树里也才能用挂载点图标。
+    // 挂载点与真实目录重名时后端把展示名改成「～xxx」并另给 path（真实路径），
+    // 这里直接用 e.path，点进去才不会跑到一个带「～」的错误目录。
     n.kids = (d.content || []).filter(e => e.is_dir)
-      .map(e => ({ name: e.name, path: joinPath(p, e.name), mount: !!e.mount }));
+      .map(e => ({ name: e.name, path: e.path || joinPath(p, e.name), mount: !!e.mount }));
   } catch (e) {
     n.kids = [];
     say(e.message, true);
@@ -418,9 +571,9 @@ const Tree = {
               title: root.open ? '收起' : '展开',
               onclick: e => { e.stopPropagation(); guard(() => toggleNode('/')); },
             }, m('svg', { viewBox: '0 0 24 24' }, m('path', { d: root.open ? I.down : I.right }))),
-            m('.kind.tiny', { class: kindClass(0, true, false) },
-              m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.dir }))),
-            m('button.tname', { onclick: () => go('/') }, '根目录 /'),
+            m('.kind.tiny', { class: kindClass(0, true, root.mount) },
+              m('svg', { viewBox: '0 0 24 24' }, m('path', { d: kindIcon(0, true, root.mount) }))),
+            m('button.tname', { title: root.mount ? '根目录 /（挂载点）' : '根目录 /', onclick: () => go('/') }, '根目录 /'),
           ]),
           root.open ? m('ul', (root.kids || []).map(k => m(TreeNode, { key: k.path, name: k.name, path: k.path, depth: 1 }))) : null,
         ]),
@@ -463,7 +616,8 @@ function visible() {
 }
 
 function onOpen(entry) {
-  const p = joinPath(state.path, entry.name);
+  // 重名的挂载点展示名带「～」，这里必须用后端给的 path，不然会跳到错误目录
+  const p = entry.path || joinPath(state.path, entry.name);
   if (entry.is_dir) return go(p);
   if (entry.type === KIND.video || entry.type === KIND.audio) return guard(() => play(p, entry));
   if (entry.type === KIND.image) return guard(() => viewImage(p));
@@ -485,13 +639,28 @@ const Files = {
     }
     if (state.view === 'grid') {
       return m('.files', m('.cards', list.map(e => {
-        const p = joinPath(state.path, e.name);
-        return m('.card', { key: e.name, onclick: () => onOpen(e), title: e.name }, [
-          m('.thumb', e.type === KIND.image
-            // 图片直接用取流地址当缩略图；取不到就回落到图标（不弹错）
-            ? m('img', { src: directURL(p), alt: e.name, loading: 'lazy', onerror: ev => { ev.target.style.display = 'none'; } })
-            : m('div.kind.big', { class: kindClass(e.type, e.is_dir, e.mount) },
-                m('svg', { viewBox: '0 0 24 24' }, m('path', { d: kindIcon(e.type, e.is_dir, e.mount) })))),
+        const p = e.path || joinPath(state.path, e.name);
+        // 音/视频试图用 .mocca 海报：图标垫底，海报盖上；海报加载失败就只留图标。
+        const thumb = e.type === KIND.image
+          ? m('img.thumb-img', { src: directURL(p), alt: e.name, loading: 'lazy', onerror: ev => { ev.target.style.display = 'none'; } })
+          : [
+            m('div.kind.big', { class: kindClass(e.type, e.is_dir, e.mount) },
+              m('svg', { viewBox: '0 0 24 24' }, m('path', { d: kindIcon(e.type, e.is_dir, e.mount) }))),
+            (e.type === KIND.video || e.type === KIND.audio)
+              ? m('img.poster-img', { src: posterURL(p), alt: e.name, loading: 'lazy', onerror: ev => { ev.target.style.display = 'none'; } })
+              : null,
+          ];
+        return m('.card', { key: e.name, onclick: () => onOpen(e), title: e.name,
+          onmouseenter: e.is_dir || e.type === KIND.image ? null : ev => guard(() => showInfo(ev, p)),
+          onmouseleave: e.is_dir || e.type === KIND.image ? null : () => { if (state.info && state.info.path === p) state.info = null; } }, [
+          m('.thumb', [
+            thumb,
+            // 管理员：媒体条目右上角的编辑钮（停播冒泡，别触发播放/预览）
+            state.isAdmin && !e.is_dir
+              ? m('button.edit-btn', { title: '编辑信息', onclick: ev => { ev.stopPropagation(); guard(() => openEdit(e)); } },
+                  m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.edit })))
+              : null,
+          ]),
           m('.cn', e.name),
           m('.cs', e.is_dir ? '目录' : fmtSize(e.size)),
         ]);
@@ -516,6 +685,11 @@ const Files = {
           m('.kind', { class: kindClass(e.type, e.is_dir, e.mount) },
             m('svg', { viewBox: '0 0 24 24' }, m('path', { d: kindIcon(e.type, e.is_dir, e.mount) }))),
           m('span.n', e.name),
+          // 管理员：非目录也有编辑入口（改名 + 附加信息）
+          state.isAdmin && !e.is_dir
+            ? m('button.edit-btn.small', { title: '编辑信息', onclick: ev => { ev.stopPropagation(); guard(() => openEdit(e)); } },
+                m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.edit })))
+            : null,
         ])),
         m('td.num.hide-sm', e.is_dir ? '—' : fmtSize(e.size)),
         m('td.num.hide-sm', fmtTime(e.modified)),
@@ -617,6 +791,122 @@ const Lightbox = {
   },
 };
 
+const InfoLayer = {
+  view() {
+    const info = state.info;
+    if (!info || !info.data) return null;
+    const d = info.data;
+    const meta = d.meta || {};
+    const title = meta.title || d.name;
+    const chips = [];
+    // 视频：导演/主演/地区/出品方；音频：语言/主唱/伴唱/演奏；共同的：年份
+    if (meta.director) chips.push(['导演', meta.director]);
+    if (meta.year) chips.push(['年份', String(meta.year)]);
+    if (meta.region) chips.push(['地区', meta.region]);
+    if (meta.studio) chips.push(['出品方', meta.studio]);
+    if (meta.language) chips.push(['语言', meta.language]);
+    if (Array.isArray(meta.cast) && meta.cast.length) chips.push(['主演', meta.cast.join(' / ')]);
+    if (Array.isArray(meta.lead) && meta.lead.length) chips.push(['主唱', meta.lead.join(' / ')]);
+    if (Array.isArray(meta.backing) && meta.backing.length) chips.push(['伴唱', meta.backing.join(' / ')]);
+    if (Array.isArray(meta.instrument) && meta.instrument.length) chips.push(['演奏', meta.instrument.join(' / ')]);
+    const summary = d.summary || meta.description || '';
+    const poster = d.poster ? posterURL(info.path) : null;
+    // 靠光标右下方展示，贴边了就向内收，别跑出视口
+    const w = window.innerWidth, h = window.innerHeight;
+    const x = Math.min(info.x + 16, w - 360);
+    const y = Math.min(info.y + 16, h - 240);
+    return m('.infolayer', { style: `left:${x}px;top:${y}px`,
+      onmouseleave: () => { state.info = null; } }, [
+      poster ? m('img.info-poster', { src: poster, alt: title }) : null,
+      m('.info-body', [
+        m('h4.info-title', { title }, title),
+        chips.length ? m('.chips', chips.map(([k, v]) =>
+          m('span.chip', { title: `${k}：${v}` }, `${k}：${v}`))) : null,
+        m('p.info-sum', summary || '暂无简介'),
+      ]),
+    ]);
+  },
+};
+
+const EditModal = {
+  view() {
+    const ed = state.edit;
+    if (!ed) return null;
+    const field = (label, key, extra = {}) => m('label.fld', [
+      m('span', label),
+      m('input', { value: ed[key], oninput: e => { ed[key] = e.target.value; }, ...extra }),
+    ]);
+    const textarea = m('label.fld', [
+      m('span', '简介'),
+      m('textarea.slim', { value: ed.description, rows: 4,
+        oninput: e => { ed.description = e.target.value; } }),
+    ]);
+
+    // 封面：音/视频可上传替换；视频另外可用 FFmpeg 按秒数截图做封面
+    const coverUI = (ed.kind === KIND.video || ed.kind === KIND.audio)
+      ? m('.cover', [
+          m('img.cov', { src: posterURL(ed.path) + (ed.posterTS ? '&t=' + ed.posterTS : ''), alt: '当前封面' }),
+          m('label.btn.ghost', { title: '选择图片上传替换封面' },
+            '上传封面',
+            m('input.file-in', { type: 'file', accept: 'image/*',
+              onchange: e => guard(() => uploadCover(ed, e.target.files[0])) })),
+          ed.kind === KIND.video
+            ? m('.shot', [
+                m('input.shot-sec', { type: 'number', min: 0, step: 1, placeholder: '秒数',
+                  value: ed.shotSec || '', oninput: e => { ed.shotSec = e.target.value; } }),
+                m('button.btn.ghost', { disabled: ed.loading,
+                  onclick: () => guard(() => doShot(ed)), title: '用 FFmpeg 截取该秒的帧作封面' },
+                  'FFmpeg 截图'),
+              ])
+            : null,
+        ])
+      : null;
+
+    // 字段随类型收敛：图片只有简介；音频是封面/简介/年份/语言/主唱/伴唱/演奏；视频用导演/主演/年份/地区/出品方。
+    let fields;
+    if (ed.kind === KIND.image) {
+      fields = [textarea];
+    } else if (ed.kind === KIND.audio) {
+      fields = [
+        coverUI,
+        m('.fld-row', [
+          field('年份', 'year', { type: 'number', placeholder: '如 2014' }),
+          field('语言', 'language'),
+        ]),
+        field('主唱', 'lead'),
+        field('伴唱', 'backing'),
+        field('演奏', 'instrument'),
+        textarea,
+      ];
+    } else { // 视频
+      fields = [
+        coverUI,
+        field('导演', 'director'),
+        field('主演（逗号分隔）', 'cast'),
+        m('.fld-row', [
+          field('年份', 'year', { type: 'number', placeholder: '如 2014' }),
+          field('地区', 'region'),
+        ]),
+        field('出品方', 'studio'),
+        textarea,
+      ];
+    }
+
+    return m('.overlay', { onclick: ev => { if (ev.target === ev.currentTarget) state.edit = null; } },
+      m('.panel', [
+        m('h3', '编辑媒体信息'),
+        field('文件名（不含扩展名）', 'name'),
+        ...fields,
+        // 最下面一行：最左边删除、最右边保存（删除已含二次确认）
+        m('.edit-foot', [
+          m('button.ghost.danger', { disabled: ed.loading, onclick: () => guard(deleteFile) }, '删除'),
+          m('button.solid', { disabled: ed.loading, onclick: () => guard(saveEdit) },
+            ed.loading ? '保存中…' : '保存'),
+        ]),
+      ]));
+  },
+};
+
 const LoginGate = {
   view() {
     return m('.overlay', m('.panel.narrow', [
@@ -652,6 +942,8 @@ const App = {
       m(PlayerBar),
       m(VideoOverlay),
       m(Lightbox),
+      // 浮动层/弹窗叠在最外层：编辑在最上，其次悬浮信息层
+      state.edit ? m(EditModal) : (state.info ? m(InfoLayer) : null),
       state.toast
         ? m('p.toast', {
             class: state.toastErr ? 'err' : '',
@@ -665,6 +957,8 @@ const App = {
 /* ── 键盘快捷键 ───────────────────────────────────────── */
 window.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
+    if (state.edit) { state.edit = null; return m.redraw(); }
+    if (state.info) { state.info = null; return m.redraw(); }
     if (state.lb) return closeLB();
     if (state.player) return closePlayer();
     if (state.drawer) { state.drawer = false; return m.redraw(); }
@@ -691,7 +985,11 @@ async function init() {
   // 手里的 state.token 还是旧的空值。
   state.token = localStorage.getItem('mocca_token') || '';
   if (state.token) {
-    try { await api('/me'); } catch { /* 令牌无效：api 已清掉 token，界面切到登录引导 */ }
+    try {
+      const me = await api('/me');
+      // 角色 2 = 管理员（models.RoleAdmin）。据此给媒体条目右上角开编辑钮。
+      state.isAdmin = me && me.role === 2;
+    } catch { /* 令牌无效：api 已清掉 token，界面切到登录引导 */ }
   }
   m.redraw();
   if (state.token || state.guest) await openDir(pathFromHash());

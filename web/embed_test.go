@@ -280,8 +280,11 @@ func TestFSStripsPrefix(t *testing.T) {
 			t.Errorf("缺少 %s: %v", name, err)
 		}
 	}
-	// 旧结构必须已经不存在，防止有人又把文件放回 public 根
-	for _, name := range []string{"home.html", "admin/index.html", "styles.css", "app.js", "home.js", "mithril.js"} {
+	// 旧平铺结构必须已经不存在，防止有人又把文件放回 public 根。
+	// 注意 admin/index.html 是新结构的正式路径，不在此列。
+	// 旧结构（平铺在根）只有 app.js / mithril.js / styles.css / index.html + logo，
+	// 前三个已被拆进 css/ 与 js/。
+	for _, name := range []string{"styles.css", "app.js", "mithril.js"} {
 		if _, err := fs.Stat(fsys, name); err == nil {
 			t.Errorf("旧的 %s 仍在 public 根，应已移到 css/ 或 js/", name)
 		}

@@ -75,23 +75,48 @@ func IsValidMediaKind(kind int) bool {
 // 视频/音频额外有：Duration、Cover、Description，以及多个作者（见 MediaAuthor）。
 // 图片只存共有三项——刻意不落封面/时长/简介，避免表结构误导调用方。
 type MediaMeta struct {
-	ID          uint      `json:"id" goe:"pk"`
-	Path        string    `json:"path" goe:"unique"`
-	Kind        int       `json:"kind"`
-	Size        int64     `json:"size"`
-	Title       string    `json:"title"`
-	Duration    int       `json:"duration"`                    // 毫秒；仅音视频
-	Cover       string    `json:"cover"`                       // 相对路径；仅音视频
-	Description string    `json:"description" goe:"type:text"` // 简介；仅音视频
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          uint   `json:"id" goe:"pk"`
+	Path        string `json:"path" goe:"unique"`
+	Kind        int    `json:"kind"`
+	Size        int64  `json:"size"`
+	Title       string `json:"title"`
+	Duration    int    `json:"duration"`                    // 毫秒；仅音视频
+	Cover       string `json:"cover"`                       // 相对路径；仅音视频
+	Description string `json:"description" goe:"type:text"` // 简介；仅音视频
+	// 影片附加信息：导演/年份/地区/出品方。仍只在音视频上落，图片不写
+	// （对齐 Duration/Cover 的「图片只存共有项」约定，见类注释）。
+	Director  string    `json:"director"`
+	Year      int       `json:"year"`
+	Region    string    `json:"region"`
+	Studio    string    `json:"studio"`
+	Language  string    `json:"language"` // 语言；音频用
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// MediaAuthor 作者：一部作品可以有多个，Order 决定展示顺序。
+// AuthorPerson 一个人员：带角色标签。Role="" 表示主演（默认/旧数据无角色，用于视频）。
+// 固定角色取值见下方常量；中文含义：director=导演、lead=主唱、backing=伴唱、
+// instrument=演奏、studio=出品方。前三个与 cast 一道分视频/音频承载。
+type AuthorPerson struct {
+	Name string `json:"name"`
+	Role string `json:"role"`
+}
+
+// 角色标签常量。空串「」是视频「主演」，聚成 cast 字段返回。
+const (
+	RoleDirector   = "director"   // 导演（视频）
+	RoleLead       = "lead"       // 主唱（音频）
+	RoleBacking    = "backing"    // 伴唱（音频）
+	RoleInstrument = "instrument" // 演奏（音频）
+	RoleStudio     = "studio"     // 出品方（视频）
+)
+
+// MediaAuthor 作者：一部作品可以有多个，Order 决定展示顺序，Role 标角色。
 type MediaAuthor struct {
 	ID      uint   `json:"id" goe:"pk"`
 	MediaID uint   `json:"media_id"`
 	Name    string `json:"name"`
+	Role    string `json:"role"`
 	Order   int    `json:"order" goe:"column:sort_order"`
 }
 
@@ -111,6 +136,7 @@ func CreateMedia(m *MediaMeta, authors []string) error {
 	// 图片不该带音视频专属字段，落库前清掉，避免脏数据
 	if m.Kind == MediaImage {
 		m.Duration, m.Cover, m.Description = 0, "", ""
+		m.Director, m.Year, m.Region, m.Studio, m.Language = "", 0, "", "", ""
 	}
 	if err := GetSchema().MediaMeta.Insert().One(m); err != nil {
 		return errors.WithStack(err)
@@ -137,6 +163,7 @@ func GetMediaByPath(path string) (*MediaMeta, error) {
 func UpdateMedia(m *MediaMeta) error {
 	if m.Kind == MediaImage {
 		m.Duration, m.Cover, m.Description = 0, "", ""
+		m.Director, m.Year, m.Region, m.Studio, m.Language = "", 0, "", "", ""
 	}
 	m.UpdatedAt = time.Now()
 	return errors.WithStack(GetSchema().MediaMeta.Save().One(m))
@@ -150,34 +177,60 @@ func DeleteMedia(id uint) error {
 	return errors.WithStack(GetSchema().MediaMeta.Delete().Where("id = ?", id).Exec())
 }
 
-// SetAuthors 整体替换某部作品的作者（先删后插，顺序即入参顺序）。
-func SetAuthors(mediaID uint, authors []string) error {
+// SetPeople 整体替换某部作品的人员（先删后插），带角色标签。顺序即入参顺序。
+// 旧 SetAuthors 内部也转走这里（Role 一律空），保证两种写法落库一致。
+func SetPeople(mediaID uint, people []AuthorPerson) error {
 	if err := GetSchema().MediaAuthor.Delete().Where("media_id = ?", mediaID).Exec(); err != nil {
 		return errors.WithStack(err)
 	}
-	for i, name := range authors {
-		name = strings.TrimSpace(name)
+	order := 0
+	for _, p := range people {
+		name := strings.TrimSpace(p.Name)
 		if name == "" {
-			continue
+			continue // 空名跳过，不占序号
 		}
-		a := &MediaAuthor{MediaID: mediaID, Name: name, Order: i}
+		a := &MediaAuthor{MediaID: mediaID, Name: name, Role: p.Role, Order: order}
 		if err := GetSchema().MediaAuthor.Insert().One(a); err != nil {
 			return errors.WithStack(err)
 		}
+		order++
 	}
 	return nil
 }
 
-// ListAuthors 按展示顺序返回作者名。
-func ListAuthors(mediaID uint) ([]string, error) {
+// SetAuthors 整体替换某部作品的作者（先删后插，无角色标签，兼容旧调用）。
+func SetAuthors(mediaID uint, authors []string) error {
+	people := make([]AuthorPerson, 0, len(authors))
+	for _, name := range authors {
+		people = append(people, AuthorPerson{Name: name})
+	}
+	return SetPeople(mediaID, people)
+}
+
+// ListPeople 按展示顺序返回人员（带角色标签）。
+func ListPeople(mediaID uint) ([]AuthorPerson, error) {
 	rows, err := GetSchema().MediaAuthor.Where("media_id = ?", mediaID).Select().All()
 	if err != nil {
-		return nil, errors.Wrap(err, "failed list authors")
+		return nil, errors.Wrap(err, "failed list people")
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Order < rows[j].Order })
-	names := make([]string, 0, len(rows))
+	out := make([]AuthorPerson, 0, len(rows))
 	for _, r := range rows {
-		names = append(names, r.Name)
+		out = append(out, AuthorPerson{Name: r.Name, Role: r.Role})
+	}
+	return out, nil
+}
+
+// ListAuthors 按展示顺序返回作者名（兼容旧调用；角色取不到，只回名字）。
+// 新代码优先用 ListPeople 以获得角色标签。
+func ListAuthors(mediaID uint) ([]string, error) {
+	people, err := ListPeople(mediaID)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(people))
+	for _, p := range people {
+		names = append(names, p.Name)
 	}
 	return names, nil
 }

@@ -58,6 +58,9 @@ func SetupAPIRoutes(e *echo.Echo) {
 	admin.POST("/fs/remove", handlers.FsRemove)
 	admin.POST("/fs/rename", handlers.FsRename)
 	admin.POST("/fs/move", handlers.FsMove)
+	admin.POST("/fs/edit", handlers.FsEdit) // 媒体条目编辑：改名 + 附加信息
+	admin.POST("/fs/cov", handlers.FsCov)   // 上传替换音/视频封面
+	admin.POST("/fs/shot", handlers.FsShot) // FFmpeg 指定秒数截图作视频封面
 	// 目录密码：给父目录设一次即可保护整棵子树
 	admin.POST("/folder/password", handlers.SetFolderPassword)
 	api.GET("/folder/status", handlers.FolderPasswordStatus)
@@ -71,6 +74,12 @@ func SetupAPIRoutes(e *echo.Echo) {
 	optional := api.Group("", middlewares.OptionalAuth(secret))
 	optional.POST("/fs/list", handlers.FsList)
 	optional.POST("/fs/get", handlers.FsGet)
+	optional.POST("/fs/info", handlers.FsInfo) // 悬浮层详情：sha1/海报/简介/元数据
+
+	// 海报图：<img> 加载，令牌走查询串，鉴权与取流同款（StreamAuth）
+	e.GET("/meta/poster", handlers.MetaPoster, middlewares.StreamAuth(secret, func() bool {
+		return models.SettingBool(handlers.SettingAllowGuest, true)
+	}))
 
 	// 取流：令牌可放请求头或查询串；没带令牌时按「允许游客」开关与浏览保持一致
 	e.GET("/d/*path", handlers.Download, middlewares.StreamAuth(secret, func() bool {

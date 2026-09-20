@@ -77,8 +77,8 @@ func TestFsListAggregatesMountsFirst(t *testing.T) {
 		t.Fatal("content 不该是 null，空列表也应是 []")
 	}
 	want := []string{
-		"archive",      // 挂载点（与真实同名目录合并成一条）
-		"adir", "Zdir", // 目录；字母序忽略大小写，所以 adir 在 Zdir 之前
+		"～archive",                // 挂载点，与真实同名目录重名 → 展示名加「～」
+		"adir", "archive", "Zdir", // 目录；字母序忽略大小写；真实 archive 保留
 		"a.mp4", "b.mp4", // 视频
 		"song.mp3", // 音频
 		"pic.png",  // 图片
@@ -189,5 +189,55 @@ func TestMountTreeRefreshAfterStorageChange(t *testing.T) {
 	}
 	if names, _, _ := listPage(t, e, "/", admin); !slices.Equal(names, []string{"media"}) {
 		t.Errorf("删掉挂载点后根层应为 [media]，got %v", names)
+	}
+}
+
+// TestFsListRootMount 挂载点为根（mount_path=/）时的行为：
+//   - 根列表的 is_mount 标记为 true，客户端据此把树根画成挂载点；
+//   - 根存储里的真实子目录与其它挂载点重名时，挂载点展示名加「～」区分、
+//     真实目录照常保留，且「～xxx」的真实导航路径由 path 字段给出（不是坏路径）。
+func TestFsListRootMount(t *testing.T) {
+	e := newApp(t)
+	root := t.TempDir() // 挂在 / 的存储内容
+	mkdir(t, filepath.Join(root, "archive"), filepath.Join(root, "media"))
+	other := t.TempDir()
+	writeTestFile(t, other, "inside.mp4", "x")
+
+	addStorage(t, "/", "Local", root)         // 根挂载点
+	addStorage(t, "/media", "Local", other)   // 与根存储里的真实目录 media 重名
+	addStorage(t, "/archive", "Local", other) // 与根存储里的真实目录 archive 重名
+
+	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
+
+	code, resp := call(t, e, http.MethodPost, "/api/fs/list", `{"path":"/"}`, admin)
+	if code != 200 {
+		t.Fatalf("列根目录失败 code=%d msg=%v", code, resp["message"])
+	}
+	data, _ := resp["data"].(map[string]any)
+	if data["is_mount"] != true {
+		t.Errorf("根是挂载点，is_mount 应为 true，got %v", data["is_mount"])
+	}
+	content, _ := data["content"].([]any)
+	present := map[string]bool{}
+	paths := map[string]string{}
+	for _, it := range content {
+		m := it.(map[string]any)
+		n := m["name"].(string)
+		present[n] = true
+		if p, ok := m["path"].(string); ok {
+			paths[n] = p
+		}
+	}
+	for _, n := range []string{"～archive", "～media", "archive", "media"} {
+		if !present[n] {
+			t.Errorf("根层缺少条目 %q，got %v", n, present)
+		}
+	}
+	// 「～」只是展示名，真实路径必须落在挂载点上
+	if paths["～archive"] != "/archive" || paths["～media"] != "/media" {
+		t.Errorf("重名挂载点的 path 应为真实挂载路径，got %v", paths)
+	}
+	if p, ok := paths["archive"]; ok {
+		t.Errorf("真实目录不应带 path 字段（应走 name 拼路径），got path=%q", p)
 	}
 }
