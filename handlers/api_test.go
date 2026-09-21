@@ -1,6 +1,7 @@
 package handlers_test
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -168,34 +169,31 @@ func TestCommentAndDanmakuEndpoints(t *testing.T) {
 	}
 }
 
-func TestMetaEndpoints(t *testing.T) {
+// TestLegacyMetaRoutesRemoved 守卫：旧 DB 媒体的 /api/meta、/api/meta/save 已随
+// MediaMeta 移除而删除，命中必须不再是 200（避免有人在没改前端的情况下用旧接口）。
+func TestLegacyMetaRoutesRemoved(t *testing.T) {
 	e := newApp(t)
 	tok := makeUser(t, e, "meta", "p", models.RoleAdmin)
 
-	body := `{"path":"/m/a.mp4","kind":` + itoa(models.MediaVideo) + `,"size":123,"title":"标题","duration":60000,` +
-		`"cover":"` + models.CoverRelPath("a.jpg") + `","description":"简介","authors":["甲","乙"]}`
-	if code, _ := call(t, e, http.MethodPost, "/api/meta/save", body, tok); code != 200 {
-		t.Fatalf("保存元数据应成功，got %d", code)
+	// 用裸请求：`call` 助手把非 200 HTTP 当失败，而这里恰恰要断言「不再是 200」。
+	check := func(method, target, body string) {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, target, rd)
+		req.Header.Set("Authorization", tok)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		if rec.Code == http.StatusOK {
+			t.Errorf("%s %s 应已随 MediaMeta 移除，got 200", method, target)
+		}
 	}
-	code, resp := call(t, e, http.MethodGet, "/api/meta?path=/m/a.mp4", "", "")
-	if code != 200 {
-		t.Fatalf("读取元数据应成功，got %d", code)
-	}
-	data, _ := resp["data"].(map[string]any)
-	meta, _ := data["meta"].(map[string]any)
-	if meta["duration"] != float64(60000) {
-		t.Errorf("duration = %v, want 60000", meta["duration"])
-	}
-	authors, _ := data["authors"].([]any)
-	if len(authors) != 2 {
-		t.Errorf("作者应有 2 个，got %v", authors)
-	}
-
-	// 非法类型被拒
-	if code, _ := call(t, e, http.MethodPost, "/api/meta/save",
-		`{"path":"/x","kind":99}`, tok); code != 400 {
-		t.Errorf("非法媒体类型应返回 400，got %d", code)
-	}
+	check(http.MethodGet, "/api/meta?path=/m/a.mp4", "")
+	check(http.MethodPost, "/api/meta/save", `{"path":"/m/a.mp4","kind":2}`)
 }
 
 func TestAvatarServesSVG(t *testing.T) {

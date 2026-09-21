@@ -175,3 +175,14 @@ func (d *SMB) Close() error {
 	smbRelease(d.key)
 	return nil
 }
+
+// Meta* 系列：SMB 的元数据放共享内、与媒体同根，直接复用内容方法。
+func (d *SMB) MetaStat(rel string) (Entry, error) { return d.Stat(rel) }
+func (d *SMB) MetaOpen(rel string) (io.ReadSeeker, int64, error) {
+	return d.Open(rel)
+}
+func (d *SMB) MetaMkdirAll(rel string) error { return d.MkdirAll(rel) }
+func (d *SMB) MetaCreate(rel string) (io.WriteCloser, error) {
+	return d.Create(rel)
+}
+func (d *SMB) MetaRemove(rel string) error { return d.Remove(rel) }

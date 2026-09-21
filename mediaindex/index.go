@@ -23,11 +23,14 @@ var MediaExts = []string{".mp4", ".mp3", ".png", ".jpg", ".jpeg"}
 
 // Record 索引的一行：一个媒体文件。字段名与用户约定一致。
 type Record struct {
-	Name     string `json:"name"`     // 文件名
-	SizeKB   int64  `json:"size_kb"`  // 大小，单位 KB
-	Modified string `json:"modified"` // 最后修改时间，RFC3339(UTC)
-	SHA1     string `json:"sha1"`     // 文件内容 sha1，40 个十六进制
-	IsNew    int    `json:"is_new"`   // 1=待生成附加信息；0=已就绪
+	Name        string `json:"name"`                   // 文件名
+	SizeKB      int64  `json:"size_kb"`                // 大小，单位 KB
+	Modified    string `json:"modified"`               // 最后修改时间，RFC3339(UTC)
+	SHA1        string `json:"sha1"`                   // 文件内容 sha1，40 个十六进制
+	IsNew       int    `json:"is_new"`                 // 1=待生成附加信息；0=已就绪
+	CaptureTime string `json:"capture_time,omitempty"` // 拍摄时间（图片 EXIF / 音视频日期）
+	Album       string `json:"album,omitempty"`        // 专辑名称
+	Artist      string `json:"artist,omitempty"`       // 作者/艺术家（索引时从文件标签提取）
 }
 
 // isMediaName 是否是需要索引的媒体文件。
@@ -62,10 +65,10 @@ func PosterRel(sha1hex string) (string, error) {
 	return metaRel(sha1hex, ".png")
 }
 
-// SummaryRel 附加信息 JSON 的相对路径（相对存储根）。
-// 例：sha1=abcd123...98 → .mocca/ab/cd/123...98.json
+// SummaryRel 附加信息文件的相对路径（相对存储根）。内容仍是 JSON，扩展名用 .meta。
+// 例：sha1=abcd123...98 → .mocca/ab/cd/123...98.meta
 func SummaryRel(sha1hex string) (string, error) {
-	return metaRel(sha1hex, ".json")
+	return metaRel(sha1hex, ".meta")
 }
 
 func metaRel(sha1hex, ext string) (string, error) {
@@ -76,13 +79,24 @@ func metaRel(sha1hex, ext string) (string, error) {
 	return filepath.Join(".mocca", sha1hex[0:2], sha1hex[2:4], sha1hex[4:]+ext), nil
 }
 
-// jsonMarshal 压缩序列化一行，包一层错误上下文。
+// jsonMarshal 压缩序列化一行：走 map 让标准库按 key 升序输出，
+// 保证 .index.jsonl 每一行 JSON 的键都是有序的
+// （album < artist < capture_time < is_new < modified < name < sha1 < size_kb）。
 func jsonMarshal(rec Record) ([]byte, error) {
-	b, err := json.Marshal(rec)
+	b, err := json.Marshal(map[string]any{
+		"name": rec.Name, "size_kb": rec.SizeKB, "modified": rec.Modified,
+		"sha1": rec.SHA1, "is_new": rec.IsNew,
+		"capture_time": rec.CaptureTime, "album": rec.Album, "artist": rec.Artist,
+	})
 	if err != nil {
 		return nil, errors.Wrapf(err, "序列化索引行 %q 失败", rec.Name)
 	}
 	return b, nil
+}
+
+// MarshalRecord 序列化一条索引行为一行 JSON（键升序）。供测试直查行内容用。
+func MarshalRecord(rec Record) ([]byte, error) {
+	return jsonMarshal(rec)
 }
 
 // hashContent 对流求 sha1，返回小写十六进制。
@@ -119,4 +133,47 @@ func readIndex(r io.Reader) (map[string]Record, error) {
 		return nil, errors.WithStack(err)
 	}
 	return out, nil
+}
+
+// readIndexRows 按行读 .index.jsonl 返回有序切片；文件不存在/为空返回空切片。
+func readIndexRows(r io.Reader) ([]Record, error) {
+	var rows []Record
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var rec Record
+		if json.Unmarshal([]byte(line), &rec) == nil && rec.Name != "" {
+			rows = append(rows, rec)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, errors.WithStack(err)
+	}
+	return rows, nil
+}
+
+// ReadIndexPage 取 .index.jsonl 的 [offset, offset+limit) 行区间（行按文件名有序，分页稳定）。
+// limit<=0 视为读完整个区间。返回该页切片与总行数 total。
+func ReadIndexPage(r io.Reader, offset, limit int) ([]Record, int, error) {
+	rows, err := readIndexRows(r)
+	if err != nil {
+		return nil, 0, err
+	}
+	total := len(rows)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	if limit > 0 && offset+limit < total {
+		rows = rows[offset : offset+limit]
+	} else {
+		rows = rows[offset:]
+	}
+	return rows, total, nil
 }

@@ -37,9 +37,23 @@ func seedIndexedMedia(t *testing.T, root string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, root, filepath.ToSlash(pr), string(png))
-	writeTestFile(t, root, filepath.ToSlash(sr), `{"summary":"测试简介"}`)
+	// .mocca 落在设备根（内容根 root 的上级），因为 seed 的 root 是设备根下的内容子目录
+	metaRoot := filepath.Dir(root)
+	writeTestFile(t, metaRoot, filepath.ToSlash(pr), string(png))
+	writeTestFile(t, metaRoot, filepath.ToSlash(sr), `{"summary":"测试简介"}`)
 	return png
+}
+
+// contentRoot 建一个「设备根 + 内容子目录」的本地内容根：本地驱动把 .mocca 落在
+// 内容根的上级（设备根），让根嵌进 t.TempDir() 的子目录，父目录（=元数据根）也随之被清理。
+func contentRoot(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	root := filepath.Join(base, "media")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
 
 func TestMetaPosterServesPngOr404(t *testing.T) {
@@ -77,7 +91,7 @@ func TestMetaPosterServesPngOr404(t *testing.T) {
 
 func TestFsInfoAggregates(t *testing.T) {
 	e := newApp(t)
-	root := t.TempDir()
+	root := contentRoot(t)
 	addStorage(t, "/media", "Local", root)
 	seedIndexedMedia(t, root)
 	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
@@ -110,14 +124,14 @@ func TestFsInfoAggregates(t *testing.T) {
 	}
 }
 
-func TestFsEditRenamesAndPersistsMeta(t *testing.T) {
+func TestFsEditWritesSummaryJSON(t *testing.T) {
 	e := newApp(t)
-	root := t.TempDir()
+	root := contentRoot(t)
 	addStorage(t, "/media", "Local", root)
 	seedIndexedMedia(t, root)
 	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
 
-	body := `{"path":"/media/a.mp4","name":"星际穿越","description":"浩瀚宇宙",
+	body := `{"path":"/media/a.mp4","name":"星际穿越","summary":"浩瀚宇宙",
 		"director":"诺兰","cast":["马修","安妮"],"year":2014,"region":"美国","studio":"派拉蒙"}`
 	if code, resp := call(t, e, http.MethodPost, "/api/fs/edit", body, admin); code != 200 {
 		t.Fatalf("编辑应成功，got %d msg=%v", code, resp["message"])
@@ -127,20 +141,19 @@ func TestFsEditRenamesAndPersistsMeta(t *testing.T) {
 		t.Errorf("改名应真改磁盘: a.mp4=%v, 星际穿越.mp4=%v",
 			exists(filepath.Join(root, "a.mp4")), exists(filepath.Join(root, "星际穿越.mp4")))
 	}
-	// 元数据迁移到新路径并可读回
-	meta, err := models.GetMediaByPath("/media/星际穿越.mp4")
+	// 附加信息应以设备 .mocca/<sha1>.meta 为唯一来源落盘（不再进数据库）
+	sr, err := mediaindex.SummaryRel(fixHash)
 	if err != nil {
-		t.Fatalf("新路径应有元数据: %v", err)
+		t.Fatal(err)
 	}
-	if meta.Director != "诺兰" || meta.Year != 2014 || meta.Region != "美国" || meta.Studio != "派拉蒙" {
-		t.Errorf("附加信息不符: %+v", meta)
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(root), filepath.ToSlash(sr)))
+	if err != nil {
+		t.Fatalf("应写出 .mocca 附加信息: %v", err)
 	}
-	if meta.Title != "星际穿越" {
-		t.Errorf("Title = %q, want 星际穿越", meta.Title)
-	}
-	people, _ := models.ListPeople(meta.ID)
-	if len(people) != 2 || people[0].Name != "马修" {
-		t.Errorf("主演未落库: %+v", people)
+	for _, want := range []string{`"director": "诺兰"`, `"year": 2014`, "马修", "安妮"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf(".mocca JSON 缺 %q: %s", want, data)
+		}
 	}
 
 	// 非管理员调编辑 → 信封 code 403
@@ -152,7 +165,7 @@ func TestFsEditRenamesAndPersistsMeta(t *testing.T) {
 
 func TestFsCovReplacesPoster(t *testing.T) {
 	e := newApp(t)
-	root := t.TempDir()
+	root := contentRoot(t)
 	addStorage(t, "/media", "Local", root)
 	_ = seedIndexedMedia(t, root)
 	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
@@ -169,13 +182,18 @@ func TestFsCovReplacesPoster(t *testing.T) {
 		t.Fatalf("上传封面应成功，got %d body=%s", rec.Code, rec.Body.String())
 	}
 
-	// 海报读回新字节
+	// 海报读回：封面统一缩放裁剪到 400×300，所以字节与上传不同，验证尺寸
 	get := httptest.NewRequest(http.MethodGet, "/meta/poster?path=/media/a.mp4", nil)
 	get.Header.Set("Authorization", admin)
 	grec := httptest.NewRecorder()
 	e.ServeHTTP(grec, get)
-	if grec.Body.String() != string(newPng) {
-		t.Errorf("封面未替换成功: got %d bytes", grec.Body.Len())
+	img, _, derr := image.Decode(bytes.NewReader(grec.Body.Bytes()))
+	if derr != nil {
+		t.Fatalf("读回的海报不是可解码图片: %v", derr)
+	}
+	if b := img.Bounds(); b.Dx() != mediaindex.CoverWidth || b.Dy() != mediaindex.CoverHeight {
+		t.Errorf("封面尺寸 = %dx%d, want %dx%d",
+			b.Dx(), b.Dy(), mediaindex.CoverWidth, mediaindex.CoverHeight)
 	}
 
 	// 非图片内容应被拒
@@ -192,30 +210,24 @@ func TestFsCovReplacesPoster(t *testing.T) {
 	}
 }
 
-func TestFsRemoveCleansMetadata(t *testing.T) {
+func TestFsRemoveCleansDevice(t *testing.T) {
 	e := newApp(t)
-	root := t.TempDir()
+	root := contentRoot(t)
 	addStorage(t, "/media", "Local", root)
 	seedIndexedMedia(t, root)
 	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
 
-	// 先写一条元数据
-	edit := `{"path":"/media/a.mp4","name":"a","description":"删除测试","year":2020}`
+	// 先编辑一次，确保确有文件待删
+	edit := `{"path":"/media/a.mp4","name":"a","summary":"删除测试","year":2020}`
 	if code, resp := call(t, e, http.MethodPost, "/api/fs/edit", edit, admin); code != 200 {
-		t.Fatalf("预写元数据失败 code=%d msg=%v", code, resp["message"])
+		t.Fatalf("预写附加信息失败 code=%d msg=%v", code, resp["message"])
 	}
-	if _, err := models.GetMediaByPath("/media/a.mp4"); err != nil {
-		t.Fatalf("删除前应有元数据: %v", err)
-	}
-	// 删除文件 → 元数据一并清掉
+	// 删除文件
 	if code, resp := call(t, e, http.MethodPost, "/api/fs/remove", `{"path":"/media/a.mp4"}`, admin); code != 200 {
 		t.Fatalf("删除应成功 code=%d msg=%v", code, resp["message"])
 	}
 	if exists(filepath.Join(root, "a.mp4")) {
 		t.Errorf("文件应被删除")
-	}
-	if _, err := models.GetMediaByPath("/media/a.mp4"); err == nil {
-		t.Errorf("元数据应一并删除")
 	}
 }
 
@@ -233,7 +245,8 @@ func makePNG(t *testing.T) []byte {
 	return buf.Bytes()
 }
 
-// makeTinyVideo 用 ffmpeg 生成一段 1 秒的迷你视频；本机没有 ffmpeg 则跳过截图测试。
+// makeTinyVideo 用 ffmpeg 生成一段 2 秒的迷你视频；本机没有 ffmpeg 则跳过截图测试。
+// 秒数给足 2 秒，保证 seek 到第 1 秒时还能抽到帧。
 // FsShot 是纯 ffmpeg 能力，缺它就无从验起，跳过而不报红。
 func makeTinyVideo(t *testing.T) []byte {
 	t.Helper()
@@ -243,7 +256,7 @@ func makeTinyVideo(t *testing.T) []byte {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "v.mp4")
 	cmd := exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=1",
-		"-t", "1", "-pix_fmt", "yuv420p", src)
+		"-t", "2", "-pix_fmt", "yuv420p", src)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("ffmpeg 生成测试视频失败: %v\n%s", err, out)
 	}
@@ -273,10 +286,101 @@ func TestFsShotRejectsNonVideo(t *testing.T) {
 	}
 }
 
+// TestFsGetServesIndexedMedia 网格点封面播放走 /fs/get：已索引的媒体必须 200 并给 raw_url。
+// 若此测试失败即复现「点击封面显示文件不存在」。
+func TestFsGetServesIndexedMedia(t *testing.T) {
+	e := newApp(t)
+	root := contentRoot(t)
+	addStorage(t, "/media", "Local", root)
+	seedIndexedMedia(t, root)
+	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
+
+	code, resp := call(t, e, http.MethodPost, "/api/fs/get", `{"path":"/media/a.mp4"}`, admin)
+	if code != 200 {
+		t.Fatalf("已索引媒体 /fs/get 应 200，got %d msg=%v", code, resp["message"])
+	}
+	d, _ := resp["data"].(map[string]any)
+	if raw, _ := d["raw_url"].(string); raw == "" {
+		t.Errorf("raw_url 应为取流地址，got %q", raw)
+	}
+}
+
+// TestFsGetTrailingSlashMount 挂载点若存了尾斜杠（历史不规范写法），
+// FsList 与 FsGet 都按 NormalizeMountPath 后的挂载点匹配，路径口径一致：
+// 列表能看、播放不 404（resolveStorage 与 resolveStorageStrict 统一口径的回归）。
+func TestFsGetTrailingSlashMount(t *testing.T) {
+	e := newApp(t)
+	root := contentRoot(t)
+	addStorage(t, "/media/", "Local", root)
+	seedIndexedMedia(t, root)
+	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
+
+	if code, resp := call(t, e, http.MethodPost, "/api/fs/list",
+		`{"path":"/media"}`, admin); code != 200 {
+		t.Fatalf("列表应 200，got %d msg=%v", code, resp["message"])
+	}
+	code, resp := call(t, e, http.MethodPost, "/api/fs/get", `{"path":"/media/a.mp4"}`, admin)
+	if code != 200 {
+		t.Fatalf("尾斜杠挂载点下 /fs/get 应 200，got %d msg=%v", code, resp["message"])
+	}
+}
+
+// TestFsGetRootMountPrefersRoot 根挂载与子挂载并存时：根挂载下的文件必须路由到
+// 根存储，而不是被 fallback 错误路由到子挂载存储（否则 /fs/get 404「文件不存在」）。
+func TestFsGetRootMountPrefersRoot(t *testing.T) {
+	e := newApp(t)
+	rootA := contentRoot(t) // 根挂载 / 的内容
+	rootB := contentRoot(t) // 子挂载 /media 的内容
+	writeTestFile(t, rootA, "a.mp4", "video-content")
+	writeTestFile(t, rootB, "b.mp4", "video-content")
+	addStorage(t, "/", "Local", rootA)
+	addStorage(t, "/media", "Local", rootB)
+	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
+
+	// 根挂载下的文件：路由到 rootA
+	code, resp := call(t, e, http.MethodPost, "/api/fs/get", `{"path":"/a.mp4"}`, admin)
+	if code != 200 {
+		t.Fatalf("根挂载文件 /fs/get 应 200，got %d msg=%v", code, resp["message"])
+	}
+	if raw := rawURLOf(t, e, "/a.mp4", admin); !strings.Contains(raw, "/d/a.mp4") {
+		t.Errorf("raw_url 应为 /d/a.mp4，got %q", raw)
+	}
+
+	// 子挂载下的文件：路由到 rootB（不应被根挂载抢走）
+	code, resp = call(t, e, http.MethodPost, "/api/fs/get", `{"path":"/media/b.mp4"}`, admin)
+	if code != 200 {
+		t.Fatalf("子挂载文件 /fs/get 应 200，got %d msg=%v", code, resp["message"])
+	}
+	if raw := rawURLOf(t, e, "/media/b.mp4", admin); !strings.Contains(raw, "/d/media/b.mp4") {
+		t.Errorf("raw_url 应为 /d/media/b.mp4，got %q", raw)
+	}
+}
+
+// TestFsShotReadsJSONBody 前端以 JSON body 提交 {path,sec}（不是 query 串），
+// 后端必须能解析出 path；解析失败会报「缺少 path」而非「仅视频」。
+func TestFsShotReadsJSONBody(t *testing.T) {
+	e := newApp(t)
+	root := t.TempDir()
+	addStorage(t, "/media", "Local", root)
+	writeTestFile(t, root, "a.txt", "hello")
+	writeTestFile(t, root, ".index.jsonl",
+		`{"name":"a.txt","size_kb":1,"modified":"2026-01-01T00:00:00Z","sha1":"`+fixHash+`","is_new":0}`+"\n")
+	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
+
+	code, resp := call(t, e, http.MethodPost, "/api/fs/shot",
+		`{"path":"/media/a.txt","sec":0}`, admin)
+	if code == 200 {
+		t.Fatalf("非视频不应截图，got code=%d", code)
+	}
+	if msg, _ := resp["message"].(string); !strings.Contains(msg, "仅视频") {
+		t.Fatalf("JSON body 应解析出 path（提示仅视频而非缺少 path），got %q", msg)
+	}
+}
+
 // TestFsShotWritesFrameAsPoster 真实视频经 FFmpeg 截图后，封面位置出现可解码 PNG。
 func TestFsShotWritesFrameAsPoster(t *testing.T) {
 	e := newApp(t)
-	root := t.TempDir()
+	root := contentRoot(t)
 	addStorage(t, "/media", "Local", root)
 
 	video := makeTinyVideo(t)
@@ -289,12 +393,12 @@ func TestFsShotWritesFrameAsPoster(t *testing.T) {
 	}
 	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
 
-	code, resp := call(t, e, http.MethodPost, "/api/fs/shot?path=/media/v.mp4&sec=0", "", admin)
+	code, resp := call(t, e, http.MethodPost, "/api/fs/shot?path=/media/v.mp4&sec=1", "", admin)
 	if code != 200 {
 		t.Fatalf("截图应成功, code=%d msg=%v", code, resp["message"])
 	}
-	// 海报位置应出现可解码的 PNG
-	data, err := os.ReadFile(filepath.Join(root, filepath.ToSlash(pr)))
+	// 海报写在设备根（内容根上级）的 .mocca 下，应出现可解码的 PNG
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(root), filepath.ToSlash(pr)))
 	if err != nil {
 		t.Fatalf("海报未写入: %v", err)
 	}

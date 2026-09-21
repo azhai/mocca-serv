@@ -11,8 +11,12 @@ import (
 	"github.com/pkg/errors"
 )
 
-// Local 本地目录。
-type Local struct{ Root string }
+// Local 本地目录。Root 是内容根（媒体），MetaRoot 是元数据根（.mocca）：
+// 通常是内容根的上级（设备根），让封面/简介随物理设备走。
+type Local struct {
+	Root     string
+	MetaRoot string
+}
 
 // NewLocal 从存储的私有配置里取根目录。
 func NewLocal(s *models.Storage) (Driver, error) {
@@ -30,7 +34,7 @@ func NewLocal(s *models.Storage) (Driver, error) {
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	return &Local{Root: abs}, nil
+	return &Local{Root: abs, MetaRoot: filepath.Dir(abs)}, nil
 }
 
 func (d *Local) List(rel string) ([]Entry, error) {
@@ -122,6 +126,51 @@ func (d *Local) Move(rel, dstDirRel string) error {
 }
 
 func (d *Local) Close() error { return nil }
+
+// metaJoin 拼元数据根下的绝对路径。
+func (d *Local) metaJoin(rel string) string {
+	return filepath.Join(d.MetaRoot, relPath(rel))
+}
+
+// Meta* 系列与内容方法同实现，只是根换成 MetaRoot（设备根，.mocca 所在处）。
+func (d *Local) MetaStat(rel string) (Entry, error) {
+	info, err := os.Stat(d.metaJoin(rel))
+	if err != nil {
+		return Entry{}, errors.WithStack(err)
+	}
+	return Entry{
+		Name: info.Name(), Size: info.Size(), IsDir: info.IsDir(), Modified: info.ModTime(),
+	}, nil
+}
+
+func (d *Local) MetaOpen(rel string) (io.ReadSeeker, int64, error) {
+	f, err := os.Open(d.metaJoin(rel))
+	if err != nil {
+		return nil, 0, errors.WithStack(err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, 0, errors.WithStack(err)
+	}
+	return f, info.Size(), nil
+}
+
+func (d *Local) MetaMkdirAll(rel string) error {
+	return errors.WithStack(os.MkdirAll(d.metaJoin(rel), 0o755))
+}
+
+func (d *Local) MetaCreate(rel string) (io.WriteCloser, error) {
+	p := d.metaJoin(rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return nil, errors.WithStack(err)
+	}
+	return os.Create(p)
+}
+
+func (d *Local) MetaRemove(rel string) error {
+	return errors.WithStack(os.RemoveAll(d.metaJoin(rel)))
+}
 
 // filepathCleanSlash 清理路径并确保带前导斜杠。
 func filepathCleanSlash(rel string) string {

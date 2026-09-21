@@ -130,7 +130,11 @@ func TestScanWritesPerDirIndex(t *testing.T) {
 }
 
 func TestIsNewFlipsWhenMoccaComplete(t *testing.T) {
-	root := t.TempDir()
+	// 内容根嵌进 t.TempDir() 的子目录：.mocca 落在其上级（设备根），父目录随之被清理
+	root := filepath.Join(t.TempDir(), "media")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "movie.mp4"), []byte("video"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +146,8 @@ func TestIsNewFlipsWhenMoccaComplete(t *testing.T) {
 		t.Fatal("初始应 is_new=1")
 	}
 
-	// 外部工具写好海报+简介后，重扫应翻成 0
+	// 外部工具写好海报+简介后，重扫应翻成 0。
+	// .mocca 落在设备根（内容根的上级），所以写在 filepath.Dir(root) 下。
 	sh := sha1hex("video")
 	poster, err := mediaindex.PosterRel(sh)
 	if err != nil {
@@ -153,7 +158,7 @@ func TestIsNewFlipsWhenMoccaComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rel := range []string{poster, summary} {
-		p := filepath.Join(root, filepath.FromSlash(rel))
+		p := filepath.Join(filepath.Dir(root), filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -170,7 +175,7 @@ func TestIsNewFlipsWhenMoccaComplete(t *testing.T) {
 	}
 
 	// 只缺简介 → 回到 1
-	if err := os.Remove(filepath.Join(root, filepath.FromSlash(summary))); err != nil {
+	if err := os.Remove(filepath.Join(filepath.Dir(root), filepath.FromSlash(summary))); err != nil {
 		t.Fatal(err)
 	}
 	scan(t, root)
@@ -218,7 +223,7 @@ func TestMetaRelSlicesSHA1(t *testing.T) {
 		t.Errorf("poster 路径不符：\n got %s\nwant %s", poster, want)
 	}
 	summary, _ := mediaindex.SummaryRel(sh)
-	if summary != strings.Replace(want, ".png", ".json", 1) {
+	if summary != strings.Replace(want, ".png", ".meta", 1) {
 		t.Errorf("summary 路径不符：%s", summary)
 	}
 	if _, err := mediaindex.PosterRel("short"); err == nil {

@@ -41,6 +41,12 @@ const I = {
 // 媒体类型，取值与 models/media.go 的 MediaKind 一一对应
 const KIND = { dir: 0, unknown: 1, video: 2, audio: 3, text: 4, image: 5 };
 
+// gridPerPage 网格每页条数：网页一页 8 个（4 列 × 2 行），中屏 6、窄屏 4。
+function gridPerPage() {
+  const w = window.innerWidth;
+  return w >= 1000 ? 8 : (w >= 760 ? 6 : 4);
+}
+
 const state = {
   token: localStorage.getItem('mocca_token') || '',
   base: location.origin + '/api',
@@ -50,6 +56,8 @@ const state = {
   err: '',
   query: '',
   view: localStorage.getItem('mocca_view') === 'grid' ? 'grid' : 'list',
+  // 网格分页（仅 .index.jsonl 的媒体条目）：perPage 随视口变，网页 2×8=16、窄屏更少。
+  page: 1, perPage: gridPerPage(), total: 0, totalPage: 1,
   drawer: false,
   tree: {},   // 路径 → { open, kids: null|[{name,path}], loading }
   pwd: {},    // 路径 → 该目录（或其上层）密码的静态哈希
@@ -58,10 +66,15 @@ const state = {
   lb: null,   // 图片预览 { imgs:[{name,path}], i, zoom, x, y, url, loading }
   toast: '', toastErr: false,
   isAdmin: false,  // /me 返回角色为管理员时为 true，据此显示媒体条目右上角的编辑钮
-  info: null,      // 音/视频悬浮信息层 { path, x, y, data, loading }
-  edit: null,      // 编辑弹窗 { path, name, description, director, cast, year, region, studio, loading }
+  edit: null,      // 编辑弹窗 { path, name, summary, director, cast, year, region, studio, loading }
   urlOf: new Map(), // 路径 → 可直接播放/预览的地址（服务端 raw_url 口径）
 };
+
+// coverRev 封面版本号：封面一经更改（上传/截图）就自增，拼进海报 URL 破缓存，
+// 让网格卡片与编辑弹窗里的封面在保存/重渲染后都能自动显示新图。
+let coverRev = 0;
+// patchSec 目录级「补充截图」的时间点，秒数或「时:分:秒」（默认第 1 秒）。
+let patchSec = '00:00:01';
 
 /* ── 基础工具 ───────────────────────────────────────── */
 function say(msg, isErr = false) {
@@ -79,6 +92,21 @@ function parentPath(p) {
   return i <= 0 ? '/' : p.slice(0, i);
 }
 function baseName(p) { return normPath(p).split('/').filter(Boolean).pop() || '/'; }
+
+// urlStateFrom 从 URL query 恢复目录与页码：刷新/书签/编辑保存后重载都保持位置。
+function urlStateFrom() {
+  const qp = new URLSearchParams(location.search);
+  return { path: normPath(qp.get('path') || '/'), page: Math.max(1, parseInt(qp.get('page') || '1', 10) || 1) };
+}
+
+// syncURL 把当前目录与页码写回 URL query（replaceState，不触发重载）。
+function syncURL() {
+  const qp = new URLSearchParams();
+  if (state.path && state.path !== '/') qp.set('path', state.path);
+  if (state.view === 'grid' && state.page > 1) qp.set('page', String(state.page));
+  const s = qp.toString();
+  history.replaceState(null, '', location.pathname + (s ? '?' + s : ''));
+}
 
 function fmtSize(n) {
   if (!n) return '—';
@@ -145,10 +173,12 @@ function pwdFor(p) {
   }
 }
 
-// listDir 列目录；遇到「需要密码」时问一次，带上后重试。
-// 密码在前端先做静态哈希（与服务端目录密码同一套约定），明文不出浏览器。
-async function listDir(p) {
+// listDir 列目录；page/perPage ≥1 时走网格分页（服务端按 .index.jsonl 行区间只回媒体，不含子目录/文本）。
+// 目录树（loadKids）不传分页，服务端回完整列表（含子目录/文本）。
+// 遇到「需要密码」时问一次，带上后重试。
+async function listDir(p, page = 0, perPage = 0) {
   const body = { path: p };
+  if (page >= 1 && perPage >= 1) { body.page = page; body.per_page = perPage; }
   const pw = pwdFor(p);
   if (pw) body.password = pw;
   try {
@@ -158,10 +188,89 @@ async function listDir(p) {
     const plain = prompt(`目录 ${p} 需要密码：`);
     if (!plain) throw new Error('已取消');
     const hash = await staticHash(plain);
-    const d = await api('/fs/list', { method: 'POST', body: { path: p, password: hash } });
+    const retry = { path: p, password: hash };
+    if (page >= 1 && perPage >= 1) { retry.page = page; retry.per_page = perPage; }
+    const d = await api('/fs/list', { method: 'POST', body: retry });
     state.pwd[p] = hash;
     return d;
   }
+}
+
+// loadPage 仅网格：取当前 state.page 那一页，刷新 entries 与 total。
+async function loadPage() {
+  state.loading = true; state.err = ''; m.redraw();
+  try {
+    const d = await listDir(state.path, state.page, state.perPage);
+    state.entries = d.content || [];
+    state.total = d.total || state.entries.length;
+    state.totalPage = state.perPage ? Math.max(1, Math.ceil(state.total / state.perPage)) : 1;
+    if (state.page > state.totalPage) { state.page = state.totalPage; }
+  } catch (e) {
+    state.entries = [];
+    state.err = e.message;
+  } finally {
+    state.loading = false;
+    syncURL(); // 翻页后把页码写回 URL，刷新/保存后保持
+    m.redraw();
+  }
+}
+
+// goPage 翻页：夹到 [1, totalPage] 内再取。
+function goPage(delta) {
+  const np = state.page + delta;
+  if (np < 1 || np > state.totalPage) return;
+  state.page = np;
+  guard(loadPage);
+}
+
+// goTo 跳到指定页码（夹到 [1, totalPage]），与当前页相同则忽略。
+function goTo(n) {
+  const np = Math.min(Math.max(1, n | 0), state.totalPage);
+  if (np === state.page) return;
+  state.page = np;
+  guard(loadPage);
+}
+
+// goVal 分页「跳转」输入框当前值。放模块级，避免在每次渲染里重建状态。
+let goVal = '';
+function goSubmit() {
+  const n = parseInt(goVal, 10);
+  if (!isNaN(n) && n >= 1 && n <= state.totalPage) goTo(n);
+  goVal = '';
+  m.redraw();
+}
+
+// gridPager 网格分页条：多于一页时显示。中间常显 ≥5 个页码（以当前页为中心向
+// 两边各扩 2，首尾落差处用「…」补齐），两侧是上一页/下一页，末尾带「跳转」输入框。
+function gridPager() {
+  if (state.view !== 'grid' || state.totalPage <= 1) return null;
+  const p = state.page, t = state.totalPage;
+  const win = Array.from(new Set([1,
+    p - 2, p - 1, p, p + 1, p + 2, t
+  ].filter(x => x >= 1 && x <= t))).sort((a, b) => a - b);
+
+  const items = [];
+  let prev = 0;
+  for (const n of win) {
+    if (prev && n - prev > 1) items.push(m('span.pages', '…'));
+    items.push(m('button.ghost', { class: n === p ? 'cur' : '', onclick: () => goTo(n) }, n));
+    prev = n;
+  }
+
+  return m('.pager', [
+    m('button.ghost', { class: p <= 1 ? 'dis' : '', disabled: p <= 1, onclick: () => goPage(-1) }, '‹ 上一页'),
+    items,
+    m('button.ghost', { class: p >= t ? 'dis' : '', disabled: p >= t, onclick: () => goPage(1) }, '下一页 ›'),
+    m('.jump', [
+      m('input.pj', {
+        type: 'number', min: 1, max: t, placeholder: String(t),
+        value: goVal,
+        oninput: ev => { goVal = ev.target.value; },
+        onkeydown: ev => { if (ev.key === 'Enter') goSubmit(); },
+      }),
+      m('button.ghost', { onclick: goSubmit }, '跳转'),
+    ]),
+  ]);
 }
 
 // driveURL 取可直接播放/预览的地址。
@@ -208,6 +317,7 @@ function posterURL(p) {
   if (state.token) q.set('token', state.token);
   const pw = pwdFor(p);
   if (pw) q.set('password', pw);
+  if (coverRev) q.set('rev', String(coverRev)); // 封面换过就带上版本号，破浏览器缓存
   return '/meta/poster?' + q.toString();
 }
 
@@ -217,35 +327,17 @@ function stripNameExt(n) {
   return i > 0 ? n.slice(0, i) : n;
 }
 
-/* ── 音/视频悬浮信息层 ─────────────────────────────── */
-// showInfo 打开悬浮层并拉 /fs/info：海报、简介、导演/主演/年份/地区/出品方一次拿全。
-async function showInfo(ev, p) {
-  if (state.edit) return;               // 编辑弹窗开着时别弹信息层
-  if (state.info && state.info.path === p) return;
-  state.info = { path: p, x: ev.clientX, y: ev.clientY, data: null, loading: true };
-  m.redraw();
-  try {
-    const body = { path: p };
-    const pw = pwdFor(p);
-    if (pw) body.password = pw;
-    const d = await api('/fs/info', { method: 'POST', body });
-    if (state.info && state.info.path === p) state.info.data = d;
-  } catch { /* 拉不到就静默关掉，不打断浏览 */ state.info = null; }
-  m.redraw();
-}
-
 /* ── 管理员编辑 ────────────────────────────────────── */
 // openEdit 打开编辑弹窗，先取现有元数据回填（避免白改覆盖）。
 // 表单字段随媒体类型变化：图片只留简介；音频用主唱/伴唱/演奏 + 语言；视频用导演/主演等。
 async function openEdit(e) {
   const p = e.path || joinPath(state.path, e.name);
-  state.info = null;
   state.edit = {
     path: p, kind: e.type || KIND.video,
     name: stripNameExt(e.name),
-    description: '', director: '', cast: '', year: '', region: '', studio: '',
+    summary: '', director: '', cast: '', year: '', region: '', studio: '',
     language: '', lead: '', backing: '', instrument: '',
-    posterTS: 0, loading: true,
+    posterTS: 0, shotSec: '1', loading: true,
   };
   m.redraw();
   try {
@@ -256,9 +348,9 @@ async function openEdit(e) {
     const meta = (d && d.meta) || {};
     if (state.edit && state.edit.path === p) {
       state.edit.name = meta.title || stripNameExt(e.name);
-      state.edit.description = meta.description || '';
+      state.edit.summary = meta.summary || '';
       state.edit.director = meta.director || '';
-      state.edit.cast = (meta.cast || []).join(', ');
+      state.edit.cast = (meta.cast || []).join('/');
       state.edit.year = meta.year || '';
       state.edit.region = meta.region || '';
       state.edit.studio = meta.studio || '';
@@ -282,9 +374,9 @@ async function saveEdit() {
     await api('/fs/edit', { method: 'POST', body: {
       path: ed.path,
       name: ed.name.trim(),
-      description: ed.description,
+      summary: ed.summary,
       director: ed.director.trim(),
-      cast: ed.cast.split(',').map(s => s.trim()).filter(Boolean),
+      cast: ed.cast.split(/[,/]/).map(s => s.trim()).filter(Boolean),
       year: parseInt(ed.year, 10) || 0,
       region: ed.region.trim(),
       studio: ed.studio.trim(),
@@ -294,7 +386,8 @@ async function saveEdit() {
       instrument: ed.instrument.split(',').map(s => s.trim()).filter(Boolean),
     } });
     state.edit = null;
-    await openDir(state.path);
+    // 只刷新当前页（保留页码），不要 openDir —— 它会重置回第一页
+    await loadPage();
   } catch (err) { if (state.edit) state.edit.loading = false; say(err.message, true); m.redraw(); }
 }
 
@@ -310,19 +403,22 @@ async function uploadCover(ed, file) {
     });
     const j = await res.json().catch(() => ({}));
     if (!j || j.code !== 200) throw new Error((j && j.message) || '上传失败');
+    coverRev++;       // 封面变了，全局版本号自增，海报 URL 变新
     ed.posterTS = Date.now(); // 让海报预览强制重新加载新图
     say('封面已更新');
   } catch (err) { say(err.message, true); }
   m.redraw();
 }
 
-// doShot 用 FFmpeg 截取视频指定秒数的帧作封面，成功后刷新预览。
+// doShot 用 FFmpeg 截取视频指定时间点的帧作封面，成功后刷新预览。
+// 时间点接受秒数或「时:分:秒」（如 1:30 或 1:02:30），由后端 normalizeShotSec 统一交给 ffmpeg。
 async function doShot(ed) {
   if (ed.loading) return;
-  const sec = parseFloat(ed.shotSec) || 0;
+  const sec = (ed.shotSec || '').trim() || '1';
   ed.loading = true; m.redraw();
   try {
     await api('/fs/shot', { method: 'POST', body: { path: ed.path, sec } });
+    coverRev++;       // 封面变了，全局版本号自增，海报 URL 变新
     ed.posterTS = Date.now(); // 让封面预览强制重新加载新图
     say('封面已从截图更新');
   } catch (err) { say(err.message, true); }
@@ -338,19 +434,35 @@ async function deleteFile() {
   try {
     await api('/fs/remove', { method: 'POST', body: { path: ed.path } });
     state.edit = null;
-    await openDir(state.path);
+    // 只刷新当前页（保留页码）；删除后 loadPage 会自动夹回有效页
+    await loadPage();
     say('已删除');
   } catch (err) { if (state.edit) state.edit.loading = false; say(err.message, true); m.redraw(); }
 }
 
+// patchCovers 目录级「补充截图」：给当前目录下缺封面的视频在指定时间点批量抽帧作封面。
+async function patchCovers() {
+  const sec = patchSec.trim() || '1';
+  const d = await api('/fs/patch', { method: 'POST', body: { path: state.path, sec } });
+  coverRev++;                 // 封面可能批量更新，破缓存
+  say(`补充封面 ${d.done} 个（共 ${d.covered}，失败 ${d.failed}）`);
+  await loadPage();
+}
+
 /* ── 目录导航 ─────────────────────────────────────────── */
-async function openDir(p) {
+async function openDir(p, opts = {}) {
   const target = normPath(p);
   state.path = target;
+  // 进新目录回到第一页；keepPage（刷新/编辑保存后的重载）保留当前页码
+  if (!opts.keepPage) state.page = 1;
   state.loading = true; state.err = ''; m.redraw();
   try {
-    const d = await listDir(target);
+    // 网格走分页（只回媒体）；列表/树走完整列表
+    const grid = state.view === 'grid';
+    const d = await listDir(target, grid ? state.page : 0, grid ? state.perPage : 0);
     state.entries = d.content || [];
+    state.total = d.total || state.entries.length;
+    state.totalPage = state.perPage ? Math.max(1, Math.ceil(state.total / state.perPage)) : 1;
   } catch (e) {
     state.entries = [];
     state.err = e.message;
@@ -359,6 +471,7 @@ async function openDir(p) {
     state.loading = false; m.redraw();
   }
   document.title = target === '/' ? 'Mocca 浏览' : baseName(target) + ' · Mocca 浏览';
+  syncURL();
   guard(() => revealPath(target));
 }
 
@@ -433,7 +546,11 @@ async function revealPath(p) {
 
 /* ── 媒体播放与图片预览 ───────────────────────────────── */
 async function play(p, entry) {
-  const url = await driveURL(p);
+  // 正常走 /fs/get 拿 raw_url；失败时退回 /d 直链（与列表同一路径口径，
+  // 列表能看则直链大概率可播）—— 即封面点击直接链接到真正的视频文件。
+  let url;
+  try { url = await driveURL(p); }
+  catch (e) { url = location.origin + directURL(p); }
   state.player = { kind: entry.type === KIND.video ? 'video' : 'audio', url, name: entry.name };
   m.redraw();
 }
@@ -518,11 +635,11 @@ const TopBar = {
       m('.viewtoggle', [
         m('button', {
           class: state.view === 'list' ? 'on' : '',
-          onclick: () => { state.view = 'list'; localStorage.setItem('mocca_view', 'list'); },
+          onclick: () => { state.view = 'list'; localStorage.setItem('mocca_view', 'list'); guard(() => openDir(state.path)); },
         }, '列表'),
         m('button', {
           class: state.view === 'grid' ? 'on' : '',
-          onclick: () => { state.view = 'grid'; localStorage.setItem('mocca_view', 'grid'); },
+          onclick: () => { state.view = 'grid'; localStorage.setItem('mocca_view', 'grid'); guard(() => openDir(state.path)); },
         }, '网格'),
       ]),
       m('button.iconbtn.solid', { title: '刷新', onclick: () => guard(() => { state.urlOf.clear(); return openDir(state.path); }) },
@@ -600,6 +717,15 @@ const Crumbs = {
           : m('button', { onclick: () => go(n.path) }, n.name);
         return i === 0 ? [el] : [m('span.sep', '/'), el];
       })),
+      // 补充截图：给本目录缺封面的视频批量生成封面（管理员）；时间点接受秒或「时:分:秒」
+      state.isAdmin
+        ? m('span.patchbar', [
+            m('input.patch-sec', { title: '截图时间点（秒数或 时:分:秒）', placeholder: '00:00:01',
+              value: patchSec, oninput: e => { patchSec = e.target.value; } }),
+            m('button.btn.ghost', { onclick: () => guard(patchCovers),
+              title: '给当前目录下缺封面的视频批量抽帧生成封面' }, '补充截图'),
+          ])
+        : null,
       m('span.muted', { style: 'margin-left:auto' },
         state.loading ? '加载中…' : (state.query && !state.query.startsWith('/')
           ? `${visible().length} / ${state.entries.length} 项`
@@ -638,61 +764,82 @@ const Files = {
         : (state.query ? `本目录没有匹配「${state.query}」的条目` : '这个目录是空的')));
     }
     if (state.view === 'grid') {
-      return m('.files', m('.cards', list.map(e => {
+      return m('.files', [
+        m('.cards', list.map(e => {
         const p = e.path || joinPath(state.path, e.name);
-        // 音/视频试图用 .mocca 海报：图标垫底，海报盖上；海报加载失败就只留图标。
-        const thumb = e.type === KIND.image
-          ? m('img.thumb-img', { src: directURL(p), alt: e.name, loading: 'lazy', onerror: ev => { ev.target.style.display = 'none'; } })
-          : [
-            m('div.kind.big', { class: kindClass(e.type, e.is_dir, e.mount) },
-              m('svg', { viewBox: '0 0 24 24' }, m('path', { d: kindIcon(e.type, e.is_dir, e.mount) }))),
-            (e.type === KIND.video || e.type === KIND.audio)
-              ? m('img.poster-img', { src: posterURL(p), alt: e.name, loading: 'lazy', onerror: ev => { ev.target.style.display = 'none'; } })
-              : null,
-          ];
-        return m('.card', { key: e.name, onclick: () => onOpen(e), title: e.name,
-          onmouseenter: e.is_dir || e.type === KIND.image ? null : ev => guard(() => showInfo(ev, p)),
-          onmouseleave: e.is_dir || e.type === KIND.image ? null : () => { if (state.info && state.info.path === p) state.info = null; } }, [
-          m('.thumb', [
-            thumb,
-            // 管理员：媒体条目右上角的编辑钮（停播冒泡，别触发播放/预览）
+        // 统一卡片：上部整幅封面（视频/音频用 .mocca 海报 4:3，图片用原图缩略），
+        // 下部正文（标题去扩展名 + 导演·年份 + 主演 + 简介沉底）。图标垫底，封面加载失败时露出。
+        const media = e.type === KIND.video || e.type === KIND.audio;
+        const cover = media
+          ? m('img.poster-img', { src: posterURL(p), alt: e.name, loading: 'lazy', onerror: ev => { ev.target.style.display = 'none'; } })
+          : (e.type === KIND.image
+              ? m('img.thumb-img', { src: directURL(p), alt: e.name, loading: 'lazy', onerror: ev => { ev.target.style.display = 'none'; } })
+              : null);
+        const body = [
+          // 名称行：标题不显示扩展名（事件/播放仍用原文件名）
+          m('.cn', [
+            m('span.nc', stripNameExt(e.name)),
             state.isAdmin && !e.is_dir
-              ? m('button.edit-btn', { title: '编辑信息', onclick: ev => { ev.stopPropagation(); guard(() => openEdit(e)); } },
+              ? m('button.edit-btn.inline', { title: '编辑信息', onclick: ev => { ev.stopPropagation(); guard(() => openEdit(e)); } },
                   m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.edit })))
               : null,
           ]),
-          m('.cn', e.name),
-          m('.cs', e.is_dir ? '目录' : fmtSize(e.size)),
+          // 主演一行：主演在左、年份贴最右（两者都无则不占位）；导演不在网格显示
+          (e.cast && e.cast.length) || e.year
+            ? m('.cast-line', [
+                e.cast && e.cast.length
+                  ? m('span.cst', { title: e.cast.join('/') }, `主演：${e.cast.join('/')}`)
+                  : null,
+                e.year ? m('span.yr', `年份：${e.year}`) : null,
+              ])
+            : null,
+          // 简介（summary）沉到卡片最底（悬停时原生 title 显示全文）
+          e.summary ? m('.cd', { title: e.summary }, e.summary) : null,
+        ];
+        return m('.card', { key: e.name, onclick: () => onOpen(e), title: e.name }, [
+          m('.thumb', [
+            m('.kind.big', { class: kindClass(e.type, e.is_dir, e.mount) },
+              m('svg', { viewBox: '0 0 24 24' }, m('path', { d: kindIcon(e.type, e.is_dir, e.mount) }))),
+            cover,
+          ]),
+          ...body,
         ]);
-      })));
+      })),
+      // 网格分页条：多于一页才显示
+      gridPager(),
+      ]);
     }
     return m('.files', m('table.filetable', [
       // colgroup 固定列宽：名称自适应剩余宽度，大小/修改时间定宽。
       // table-layout: fixed + colgroup 是表头与表体严格对齐的最稳做法；
       // 列宽给足，日期(如 2026-09-17 14:30)与大小(如 1.2 GB)不会溢出到相邻列。
+      // 管理员登录时末尾多一列「操作」放编辑钮。
       m('colgroup', [
         m('col'),
         m('col.hide-sm', { style: 'width:130px' }),
         m('col.hide-sm', { style: 'width:190px' }),
+        state.isAdmin ? m('col.op-col', { style: 'width:64px' }) : null,
       ]),
       m('thead', m('tr', [
         m('th', '名称'),
         m('th.num.hide-sm', '大小'),
         m('th.num.hide-sm', '修改时间'),
+        state.isAdmin ? m('th.op', '操作') : null,
       ])),
       m('tbody', list.map(e => m('tr.row', { key: e.name, onclick: () => onOpen(e), title: e.name }, [
         m('td', m('.fname', [
           m('.kind', { class: kindClass(e.type, e.is_dir, e.mount) },
             m('svg', { viewBox: '0 0 24 24' }, m('path', { d: kindIcon(e.type, e.is_dir, e.mount) }))),
           m('span.n', e.name),
-          // 管理员：非目录也有编辑入口（改名 + 附加信息）
-          state.isAdmin && !e.is_dir
-            ? m('button.edit-btn.small', { title: '编辑信息', onclick: ev => { ev.stopPropagation(); guard(() => openEdit(e)); } },
-                m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.edit })))
-            : null,
         ])),
         m('td.num.hide-sm', e.is_dir ? '—' : fmtSize(e.size)),
         m('td.num.hide-sm', fmtTime(e.modified)),
+        // 操作列：只给媒体条目放编辑钮（目录无附加信息可改）
+        state.isAdmin
+          ? m('td.op', e.is_dir ? null
+              : m('button.edit-btn.small', { title: '编辑信息', onclick: ev => { ev.stopPropagation(); guard(() => openEdit(e)); } },
+                  m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.edit }))))
+          : null,
       ]))),
     ]));
   },
@@ -711,6 +858,13 @@ const PlayerBar = {
   },
 };
 
+// seekVid 视频快进/快退：按住前先钳到 [0, duration]。
+function seekVid(delta) {
+  const v = document.querySelector('.playbox video');
+  if (!v || isNaN(v.duration)) return;
+  v.currentTime = Math.min(Math.max(0, v.currentTime + delta), v.duration);
+}
+
 const VideoOverlay = {
   view() {
     const p = state.player;
@@ -719,6 +873,8 @@ const VideoOverlay = {
       m('.playbox', [
         m('video', { src: p.url, controls: true, autoplay: true, playsinline: true }),
         m('.pbar', [
+          m('button.btn.ghost', { title: '后退 10 秒', onclick: () => seekVid(-10) }, '-10s'),
+          m('button.btn.ghost', { title: '前进 10 秒', onclick: () => seekVid(10) }, '+10s'),
           m('span.pt', { title: p.name }, p.name),
           m('button.iconbtn.solid', { title: '关闭（Esc）', onclick: closePlayer },
             m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.close }))),
@@ -791,43 +947,6 @@ const Lightbox = {
   },
 };
 
-const InfoLayer = {
-  view() {
-    const info = state.info;
-    if (!info || !info.data) return null;
-    const d = info.data;
-    const meta = d.meta || {};
-    const title = meta.title || d.name;
-    const chips = [];
-    // 视频：导演/主演/地区/出品方；音频：语言/主唱/伴唱/演奏；共同的：年份
-    if (meta.director) chips.push(['导演', meta.director]);
-    if (meta.year) chips.push(['年份', String(meta.year)]);
-    if (meta.region) chips.push(['地区', meta.region]);
-    if (meta.studio) chips.push(['出品方', meta.studio]);
-    if (meta.language) chips.push(['语言', meta.language]);
-    if (Array.isArray(meta.cast) && meta.cast.length) chips.push(['主演', meta.cast.join(' / ')]);
-    if (Array.isArray(meta.lead) && meta.lead.length) chips.push(['主唱', meta.lead.join(' / ')]);
-    if (Array.isArray(meta.backing) && meta.backing.length) chips.push(['伴唱', meta.backing.join(' / ')]);
-    if (Array.isArray(meta.instrument) && meta.instrument.length) chips.push(['演奏', meta.instrument.join(' / ')]);
-    const summary = d.summary || meta.description || '';
-    const poster = d.poster ? posterURL(info.path) : null;
-    // 靠光标右下方展示，贴边了就向内收，别跑出视口
-    const w = window.innerWidth, h = window.innerHeight;
-    const x = Math.min(info.x + 16, w - 360);
-    const y = Math.min(info.y + 16, h - 240);
-    return m('.infolayer', { style: `left:${x}px;top:${y}px`,
-      onmouseleave: () => { state.info = null; } }, [
-      poster ? m('img.info-poster', { src: poster, alt: title }) : null,
-      m('.info-body', [
-        m('h4.info-title', { title }, title),
-        chips.length ? m('.chips', chips.map(([k, v]) =>
-          m('span.chip', { title: `${k}：${v}` }, `${k}：${v}`))) : null,
-        m('p.info-sum', summary || '暂无简介'),
-      ]),
-    ]);
-  },
-};
-
 const EditModal = {
   view() {
     const ed = state.edit;
@@ -836,66 +955,62 @@ const EditModal = {
       m('span', label),
       m('input', { value: ed[key], oninput: e => { ed[key] = e.target.value; }, ...extra }),
     ]);
-    const textarea = m('label.fld', [
+    const textarea = m('label.fld.tarea', [
       m('span', '简介'),
-      m('textarea.slim', { value: ed.description, rows: 4,
-        oninput: e => { ed.description = e.target.value; } }),
+      m('textarea.slim', { value: ed.summary, rows: 4,
+        oninput: e => { ed.summary = e.target.value; } }),
     ]);
 
-    // 封面：音/视频可上传替换；视频另外可用 FFmpeg 按秒数截图做封面
+    // 封面：音/视频可上传替换；视频另外可用 FFmpeg 按秒数截图做封面。
+    // 上下摆放：封面图在上、上传按钮、FFmpeg 截图（输入+按钮）在下。
     const coverUI = (ed.kind === KIND.video || ed.kind === KIND.audio)
       ? m('.cover', [
           m('img.cov', { src: posterURL(ed.path) + (ed.posterTS ? '&t=' + ed.posterTS : ''), alt: '当前封面' }),
-          m('label.btn.ghost', { title: '选择图片上传替换封面' },
-            '上传封面',
-            m('input.file-in', { type: 'file', accept: 'image/*',
-              onchange: e => guard(() => uploadCover(ed, e.target.files[0])) })),
-          ed.kind === KIND.video
-            ? m('.shot', [
-                m('input.shot-sec', { type: 'number', min: 0, step: 1, placeholder: '秒数',
-                  value: ed.shotSec || '', oninput: e => { ed.shotSec = e.target.value; } }),
-                m('button.btn.ghost', { disabled: ed.loading,
-                  onclick: () => guard(() => doShot(ed)), title: '用 FFmpeg 截取该秒的帧作封面' },
-                  'FFmpeg 截图'),
-              ])
-            : null,
+          m('.cover-tools', [
+            m('label.btn.ghost', { title: '选择图片上传替换封面' },
+              '上传封面',
+              m('input.file-in', { type: 'file', accept: 'image/*',
+                onchange: e => guard(() => uploadCover(ed, e.target.files[0])) })),
+            ed.kind === KIND.video
+              ? m('.shot', [
+                    m('input.shot-sec', { type: 'text', placeholder: '0:01 或 1:30',
+                      value: ed.shotSec || '1', oninput: e => { ed.shotSec = e.target.value; } }),
+                    m('button.btn.ghost', { disabled: ed.loading,
+                      onclick: () => guard(() => doShot(ed)), title: '用 FFmpeg 截取指定时间点的帧作封面' },
+                      'FFmpeg 截图'),
+                  ])
+              : null,
+          ]),
         ])
       : null;
 
-    // 字段随类型收敛：图片只有简介；音频是封面/简介/年份/语言/主唱/伴唱/演奏；视频用导演/主演/年份/地区/出品方。
+    // 字段随类型收敛：图片无附加信息；音频只有语言/作者；视频去掉出品方与地区，导演跟年份同一行。
     let fields;
     if (ed.kind === KIND.image) {
-      fields = [textarea];
+      fields = [];
     } else if (ed.kind === KIND.audio) {
       fields = [
-        coverUI,
-        m('.fld-row', [
-          field('年份', 'year', { type: 'number', placeholder: '如 2014' }),
-          field('语言', 'language'),
-        ]),
-        field('主唱', 'lead'),
-        field('伴唱', 'backing'),
-        field('演奏', 'instrument'),
-        textarea,
+        field('语言', 'language'),
+        field('作者', 'cast'),
       ];
     } else { // 视频
       fields = [
-        coverUI,
-        field('导演', 'director'),
-        field('主演（逗号分隔）', 'cast'),
         m('.fld-row', [
+          field('导演', 'director'),
           field('年份', 'year', { type: 'number', placeholder: '如 2014' }),
-          field('地区', 'region'),
         ]),
-        field('出品方', 'studio'),
+        field('主演', 'cast', { placeholder: '用逗号或斜线分隔，空格自动去除' }),
         textarea,
       ];
     }
 
-    return m('.overlay', { onclick: ev => { if (ev.target === ev.currentTarget) state.edit = null; } },
-      m('.panel', [
-        m('h3', '编辑媒体信息'),
-        field('文件名（不含扩展名）', 'name'),
+    return m('.overlay.scrim-edit', [
+      m('.panel.edit-panel', [
+        // 右上角主动关闭；点遮罩不退出，避免误触丢编辑
+        m('button.iconbtn.close-edit', { title: '关闭', onclick: () => { state.edit = null; } },
+          m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.close }))),
+        coverUI,
+        field('文件名', 'name', { placeholder: '不含扩展名' }),
         ...fields,
         // 最下面一行：最左边删除、最右边保存（删除已含二次确认）
         m('.edit-foot', [
@@ -903,7 +1018,8 @@ const EditModal = {
           m('button.solid', { disabled: ed.loading, onclick: () => guard(saveEdit) },
             ed.loading ? '保存中…' : '保存'),
         ]),
-      ]));
+      ]),
+    ]);
   },
 };
 
@@ -942,8 +1058,8 @@ const App = {
       m(PlayerBar),
       m(VideoOverlay),
       m(Lightbox),
-      // 浮动层/弹窗叠在最外层：编辑在最上，其次悬浮信息层
-      state.edit ? m(EditModal) : (state.info ? m(InfoLayer) : null),
+      // 浮动层/弹窗叠在最外层：编辑弹窗在最上
+      state.edit ? m(EditModal) : null,
       state.toast
         ? m('p.toast', {
             class: state.toastErr ? 'err' : '',
@@ -957,8 +1073,8 @@ const App = {
 /* ── 键盘快捷键 ───────────────────────────────────────── */
 window.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    if (state.edit) { state.edit = null; return m.redraw(); }
-    if (state.info) { state.info = null; return m.redraw(); }
+    // 编辑弹窗不响应 Esc：内容改动多，误触 Esc 会丢已填信息，关闭走右上角按钮
+    if (state.edit) return;
     if (state.lb) return closeLB();
     if (state.player) return closePlayer();
     if (state.drawer) { state.drawer = false; return m.redraw(); }
@@ -972,9 +1088,14 @@ window.addEventListener('keydown', e => {
   else if (e.key === '0') { state.lb.zoom = 1; state.lb.x = 0; state.lb.y = 0; m.redraw(); }
 });
 
-// 屏幕旋转/窗口变宽后抽屉要收起来，否则会一直盖在内容上
+// 屏幕旋转/窗口变宽后抽屉要收起来，否则会一直盖在内容上；网格视口变化重算每页条数
 window.addEventListener('resize', () => {
   if (state.drawer && window.innerWidth > 900) { state.drawer = false; m.redraw(); }
+  if (state.view === 'grid' && state.perPage !== gridPerPage()) {
+    state.perPage = gridPerPage();
+    if (!state.loading) guard(loadPage);
+    m.redraw();
+  }
 });
 
 window.addEventListener('hashchange', () => guard(() => openDir(pathFromHash())));
@@ -992,7 +1113,15 @@ async function init() {
     } catch { /* 令牌无效：api 已清掉 token，界面切到登录引导 */ }
   }
   m.redraw();
-  if (state.token || state.guest) await openDir(pathFromHash());
+  if (state.token || state.guest) {
+    // URL 带 ?path=&page= 时按它进入（刷新/书签保持位置）；否则退回 hash 路由
+    const qp = new URLSearchParams(location.search);
+    const startPath = qp.get('path') ? urlStateFrom().path : pathFromHash();
+    const startPage = qp.get('path') ? urlStateFrom().page : 1;
+    state.path = startPath;
+    state.page = startPage;
+    await openDir(startPath, { keepPage: true });
+  }
 }
 
 m.mount(document.getElementById('app'), App);

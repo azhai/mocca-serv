@@ -18,22 +18,21 @@ func isNoRows(err error) bool { return errors.Is(err, sql.ErrNoRows) }
 var ErrRecordNotFound = errors.New("record not found")
 
 // Tables 全部表。goent 只绑定嵌套结构体内的字段为表，
-// 表名默认 snake_case：User→user、Setting→setting、MediaMeta→media_meta。
+// 表名默认 snake_case：User→user、Setting→setting。
+//
+// 服务端只落账号、挂载点、设置与收藏；媒体附加信息（简介/导演/主演等）
+// 以设备上的 .mocca/xx/xx/<sha1>.json 为唯一来源，不落库。
 //
 // 明确**不**建的表（按产品约定，数据只留在 APP 本地）：
 //   - 播放历史：APP 端维护；
 //   - 稍后再看：APP 端维护；
 //   - 播放进度（看到第几秒）：APP 端维护。
-//
-// 服务端只落「收藏」这一项跨设备需要同步的数据。
 type Tables struct {
-	User        *goent.Table[User]
-	Storage     *goent.Table[Storage]
-	Setting     *goent.Table[Setting]
-	Favorite    *goent.Table[Favorite]
-	MediaMeta   *goent.Table[MediaMeta]
-	MediaAuthor *goent.Table[MediaAuthor]
-	Comment     *goent.Table[Comment]
+	User     *goent.Table[User]
+	Storage  *goent.Table[Storage]
+	Setting  *goent.Table[Setting]
+	Favorite *goent.Table[Favorite]
+	Comment  *goent.Table[Comment]
 }
 
 // Database 组合表与连接，对应 flock 的 models.Database。
@@ -76,8 +75,6 @@ var hotIndexes = []string{
 	"CREATE INDEX IF NOT EXISTS idx_comment_path_type ON comment(path, type)",
 	"CREATE INDEX IF NOT EXISTS idx_comment_user ON comment(user_id)",
 	"CREATE INDEX IF NOT EXISTS idx_favorite_user ON favorite(user_id)",
-	"CREATE INDEX IF NOT EXISTS idx_media_author_name ON media_author(name)",
-	"CREATE INDEX IF NOT EXISTS idx_media_author_media ON media_author(media_id)",
 }
 
 func ensureIndexes(s *Database) error {

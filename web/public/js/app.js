@@ -17,8 +17,6 @@ const state = {
   login: { user: '', pwd: '' },
   storages: [], storageForm: null,
   users: [], userForm: null,
-  meta: { path: '', loaded: null, authors: [] },
-  cover: null, // 封面图制作面板的编辑态；null = 收起
   folder: { path: '/media/', pwd: '' },
   upload: { dir: '/', files: [], busy: false },
 };
@@ -34,16 +32,6 @@ async function api(path, { method = 'GET', body, token = state.token } = {}) {
     body = JSON.stringify(body);
   }
   const env = await (await fetch(state.base + path, { method, headers, body })).json();
-  if (env.code !== 200) throw new Error(env.message || '请求失败');
-  return env.data;
-}
-
-// apiForm 与 api 同源，走 multipart：封面图是二进制，塞不进 JSON。
-// 不要设 Content-Type —— 浏览器要自己补 boundary，写死会让服务端解析不出表单。
-async function apiForm(path, fd) {
-  const headers = {};
-  if (state.token) headers['Authorization'] = state.token;
-  const env = await (await fetch(state.base + path, { method: 'POST', headers, body: fd })).json();
   if (env.code !== 200) throw new Error(env.message || '请求失败');
   return env.data;
 }
@@ -296,229 +284,6 @@ function editUser(u) {
     base_path: u.base_path || '', avatar: u.avatar || '01' };
 }
 
-/* ── 元数据 ─────────────────────────────────────────── */
-// 取值必须与 APP 端 MediaKind 逐一对齐（models/media.go）：video=2 / audio=3 / image=5。
-// 这里曾经按 1/2/3 顺排，结果是「保存元数据」永远返回「媒体类型不合法」——
-// 因为 1 在契约里是 unknown，而图片是 5。错位不报错，只是存不进去。
-const KINDS = [{ v: 2, label: '视频' }, { v: 3, label: '音频' }, { v: 5, label: '图片' }];
-
-const Meta = {
-  view() {
-    const s = state.meta;
-    return m('.panel', [
-      m('h2', '媒体元数据'),
-      m('p.muted', '路径用 APP 里的完整路径（如 /media/电影/a.mp4）。图片只存路径/大小/标题。'),
-      m('.row', [
-        m('input[type=text]', {
-          placeholder: '/media/a.mp4', value: s.path,
-          oninput: e => s.path = e.target.value,
-        }),
-        m('button.ghost', {
-          onclick: () => guard(async () => {
-            const d = await api('/meta?path=' + encodeURIComponent(s.path));
-            s.loaded = d.meta; s.authors = (d.authors || []).join(', ');
-            say('已载入');
-          }),
-        }, '载入'),
-        m('button.ghost', {
-          onclick: () => { s.loaded = { path: s.path, kind: 2 }; s.authors = ''; },
-        }, '新建'),
-      ]),
-      s.loaded ? m('div', [
-        m('.grid', [
-          m('label', [m('span', '类型'),
-            m('select', { value: s.loaded.kind, onchange: e => s.loaded.kind = Number(e.target.value) },
-              KINDS.map(k => m('option', { value: k.v }, k.label)))]),
-          m('label', [m('span', '标题（可空）'),
-            m('input[type=text]', { value: s.loaded.title || '', oninput: e => s.loaded.title = e.target.value })]),
-          m('label', [m('span', '时长（毫秒，仅音视频）'),
-            m('input[type=number]', { value: s.loaded.duration || 0,
-              oninput: e => s.loaded.duration = Number(e.target.value) })]),
-          m('label', [m('span', '封面（隐藏目录内相对路径）'),
-            m('input[type=text]', { value: s.loaded.cover || '', oninput: e => s.loaded.cover = e.target.value })]),
-          m('label', [m('span', '作者（英文逗号分隔，可多个）'),
-            m('input[type=text]', { value: s.authors, oninput: e => s.authors = e.target.value })]),
-        ]),
-        m('label', [m('span', '简介'),
-          m('input[type=text]', { value: s.loaded.description || '',
-            oninput: e => s.loaded.description = e.target.value })]),
-        CoverMaker.view(),
-        m('button', {
-          onclick: () => guard(async () => {
-            await api('/meta/save', { method: 'POST', body: {
-              path: s.path, kind: s.loaded.kind, size: s.loaded.size || 0,
-              title: s.loaded.title || '', duration: s.loaded.duration || 0,
-              cover: s.loaded.cover || '', description: s.loaded.description || '',
-              authors: s.authors.split(',').map(x => x.trim()).filter(Boolean),
-            }});
-            say('已保存');
-          }),
-        }, '保存元数据'),
-      ]) : null,
-    ]);
-  },
-};
-
-/* ── 封面图制作 ─────────────────────────────────────── */
-// 封面图是**在浏览器里画出来的**：canvas 用得上系统字体，中文标题才能正常排版，
-// 服务端只负责把画好的 PNG 落进 <数据目录>/.mocca/covers/（handlers/cover_admin.go）。
-// 「制作封面图」因此天然属于管理后台的能力：纯 API 构建里既没有这块画布，
-// 也没有接收它的接口（同名处理器在 -tags noweb 下只回一句说明）。
-const COVER_W = 1280, COVER_H = 720; // 画布尺寸即落盘尺寸，16:9 是媒体库封面的通用比例
-
-// 与预设头像同一套低饱和配色（handlers/avatar.go 的 avatarColors）：
-// 两个界面来回看时才不会像两个项目。
-const COVER_COLORS = [
-  ['#6E8B3D', '#33421B'], ['#5C7A6B', '#2B3A34'], ['#6B7A8F', '#313A46'],
-  ['#8F7A9A', '#41364A'], ['#A2685A', '#4C2C25'], ['#96A55C', '#47502A'],
-];
-
-let coverCanvas = null;  // oncreate 时赋值；输入变化后重画就画在它上面
-let coverBgImage = null; // 用户挑的背景图，可选
-
-const CoverMaker = {
-  view() {
-    const s = state.meta;
-    if (!state.cover) {
-      return m('.form-section', [
-        m('h3', '封面图'),
-        m('.row', [
-          m('button.ghost', { onclick: openCover }, '制作封面图'),
-          m('span.muted', s.loaded.cover ? '当前：' + s.loaded.cover : '还没有封面'),
-        ]),
-      ]);
-    }
-    const c = state.cover;
-    return m('.form-section', [
-      m('h3', '封面图（1280×720）'),
-      m('canvas.cover-canvas', {
-        width: COVER_W, height: COVER_H,
-        // 用 oncreate 而不是 onupdate：画布建好之后的重画由输入事件直接调 drawCover()，
-        // 不必让 mithril 在每次重绘时再画一遍。
-        oncreate: v => { coverCanvas = v.dom; drawCover(); },
-      }),
-      m('.grid', [
-        m('label', [m('span', '标题'),
-          m('input[type=text]', { value: c.title,
-            oninput: e => { c.title = e.target.value; drawCover(); } })]),
-        m('label', [m('span', '副标题（可空）'),
-          m('input[type=text]', { value: c.subtitle,
-            oninput: e => { c.subtitle = e.target.value; drawCover(); } })]),
-      ]),
-      m('.row', [
-        m('label', [m('span', '背景图（可选）'),
-          m('input[type=file][accept=image/*]', { onchange: pickCoverBg })]),
-        m('button.ghost', {
-          onclick: () => { coverBgImage = null; drawCover(); },
-        }, '去掉背景'),
-        m('button', { onclick: () => guard(saveCover) }, '保存封面'),
-        m('button.ghost', {
-          onclick: () => { state.cover = null; coverCanvas = null; },
-        }, '收起'),
-      ]),
-    ]);
-  },
-};
-
-function openCover() {
-  const s = state.meta;
-  const base = (s.path || '').split('/').pop() || '';
-  coverBgImage = null;
-  state.cover = {
-    // 标题默认取元数据里的，其次取文件名（去掉扩展名）：多数情况下一次都不用改
-    title: s.loaded.title || base.replace(/\.[^.]+$/, '') || '未命名',
-    subtitle: s.authors || '',
-  };
-}
-
-function pickCoverBg(e) {
-  const file = e.target.files && e.target.files[0];
-  e.target.value = ''; // 清空才能连续选同一个文件
-  if (!file) return;
-  const img = new Image();
-  img.onload = () => { coverBgImage = img; drawCover(); };
-  img.onerror = () => say('这张图片读不出来', true);
-  img.src = URL.createObjectURL(file);
-}
-
-// drawCover 把当前编辑态画到画布上：所有输入变化都走它，保证「所见即所存」。
-function drawCover() {
-  const c = state.cover;
-  if (!coverCanvas || !c) return;
-  const ctx = coverCanvas.getContext('2d');
-  const [top, bottom] = COVER_COLORS[hashText(c.title) % COVER_COLORS.length];
-
-  const grad = ctx.createLinearGradient(0, 0, COVER_W, COVER_H);
-  grad.addColorStop(0, top);
-  grad.addColorStop(1, bottom);
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, COVER_W, COVER_H);
-
-  if (coverBgImage) {
-    // 按短边铺满裁切，避免拉变形；再压一层暗底，浅色画面上的白字才看得清
-    const k = Math.max(COVER_W / coverBgImage.width, COVER_H / coverBgImage.height);
-    const w = coverBgImage.width * k, h = coverBgImage.height * k;
-    ctx.drawImage(coverBgImage, (COVER_W - w) / 2, (COVER_H - h) / 2, w, h);
-    ctx.fillStyle = 'rgba(0,0,0,.45)';
-    ctx.fillRect(0, 0, COVER_W, COVER_H);
-  }
-
-  const pad = 72;
-  let y = pad;
-  ctx.textBaseline = 'top';
-  ctx.fillStyle = '#FDFBF4';
-  ctx.font = '600 84px "PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif';
-  for (const line of wrapText(ctx, c.title || '未命名', COVER_W - pad * 2)) {
-    ctx.fillText(line, pad, y);
-    y += 100;
-  }
-  if (c.subtitle) {
-    ctx.font = '400 36px "PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif';
-    ctx.fillStyle = 'rgba(253,251,244,.85)';
-    ctx.fillText(wrapText(ctx, c.subtitle, COVER_W - pad * 2)[0], pad, y + 8);
-  }
-  // 左下角一道强调色，纯装饰：成品不至于是一块纯色
-  ctx.fillStyle = 'rgba(253,251,244,.9)';
-  ctx.fillRect(pad, COVER_H - pad - 8, 96, 8);
-}
-
-// hashText 把标题摊成一个稳定下标：同一个标题永远同一套配色。
-function hashText(s) {
-  let h = 0;
-  for (const ch of String(s)) h = (h * 31 + ch.codePointAt(0)) >>> 0;
-  return h;
-}
-
-// wrapText 逐字符量宽折行：中英数混排的标题都能量准，
-// 按空格切词在中文上会直接失效（整句一个词）。
-function wrapText(ctx, text, maxWidth) {
-  const lines = [];
-  let line = '';
-  for (const ch of String(text)) {
-    if (ch === '\n') { lines.push(line); line = ''; continue; }
-    if (line && ctx.measureText(line + ch).width > maxWidth) { lines.push(line); line = ch; }
-    else line += ch;
-  }
-  if (line) lines.push(line);
-  return lines.length ? lines : [''];
-}
-
-async function saveCover() {
-  const s = state.meta;
-  const blob = await new Promise(res => coverCanvas.toBlob(res, 'image/png'));
-  if (!blob) throw new Error('画布导出失败');
-  const fd = new FormData();
-  // 文件名带扩展名没关系：服务端会去掉它，按嗅探出的真实类型补扩展名
-  fd.append('name', (s.path || '').split('/').pop() || 'cover');
-  fd.append('file', blob, 'cover.png');
-  const d = await apiForm('/meta/cover', fd);
-  s.loaded.cover = d.cover;
-  state.cover = null;
-  coverCanvas = null;
-  coverBgImage = null;
-  say('封面已生成：' + d.cover + '；点「保存元数据」写入这条记录');
-}
-
 /* ── 目录密码 ───────────────────────────────────────── */
 const FolderPwd = {
   view() {
@@ -638,7 +403,6 @@ const CHECK_ICON = 'M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z';
 const PAGES = [
   ['storages', '挂载点', Storages],
   ['users', '用户', Users],
-  ['meta', '元数据', Meta],
   ['folder', '目录密码', FolderPwd],
   ['upload', '上传', Upload],
 ];

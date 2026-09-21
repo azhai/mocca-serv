@@ -77,6 +77,29 @@ func main() {
 			models.DefaultAdminName, cfg.AdminPassword)
 	}
 
+	// 服务启动对每个启用存储先全量索引一次：文件监控只做增量刷新、凭空不会生成索引，
+	// 首次挂载若没有 .index.jsonl 浏览端会一片空白。后台执行，失败不阻断启动。
+	go func() {
+		storages, lerr := models.ListStorages()
+		if lerr != nil {
+			log.Printf("启动索引失败: %v", lerr)
+			return
+		}
+		for _, s := range storages {
+			if s.Disabled {
+				continue
+			}
+			n, serr := mediaindex.ScanStorage(s)
+			if serr != nil {
+				log.Printf("存储 %s 启动索引失败: %v", s.MountPath, serr)
+				continue
+			}
+			if n > 0 {
+				log.Printf("存储 %s 已索引 %d 个媒体文件", s.MountPath, n)
+			}
+		}
+	}()
+
 	root := echo.New()
 
 	// 请求体上限：防止超大请求把磁盘写满
@@ -113,6 +136,13 @@ func main() {
 	// 收到 SIGINT/SIGTERM 后优雅退出，等在途请求结束
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// 媒体文件监控：本地存储有文件增删改时，增量刷新所在目录的 .index.jsonl
+	go func() {
+		if err := mediaindex.WatchStorages(ctx, log.Printf); err != nil {
+			log.Printf("启动文件监控失败: %v", err)
+		}
+	}()
 
 	go func() {
 		log.Printf("mocca 监听 %s（数据目录 %s）", cfg.Addr, cfg.DataDir)

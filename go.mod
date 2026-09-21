@@ -6,9 +6,12 @@ require (
 	github.com/azhai/gobus v0.2.1
 	github.com/azhai/goent v0.9.9-beta.3
 	github.com/cloudsoda/go-smb2 v0.0.0-20260916044308-cba813414346
+	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/golang-jwt/jwt/v4 v4.5.2
 	github.com/labstack/echo/v5 v5.3.1
 	github.com/pkg/errors v0.9.1
+	github.com/rwcarlsen/goexif v0.0.0-20190401172101-9e8deecbddbd
 	golang.org/x/crypto v0.57.0
 )
 
