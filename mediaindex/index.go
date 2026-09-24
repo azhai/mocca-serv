@@ -12,14 +12,57 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/azhai/mocca/models"
 	"github.com/pkg/errors"
 )
 
 // IndexFileName 每个目录一个的索引文件名。点开头，浏览列表天然隐去。
 const IndexFileName = ".index.jsonl"
 
-// MediaExts 当前纳入索引的媒体扩展名（小写，不区分大小写匹配）。
-var MediaExts = []string{".mp4", ".mp3", ".png", ".jpg", ".jpeg"}
+// 媒体扩展名清单：**索引收录与类型识别共用同一份**。
+//
+// 这里曾经只有 5 个扩展名（.mp4/.mp3/.png/.jpg/.jpeg），而类型识别（localKind、
+// 浏览列表的 guessType）认识一大票 —— 于是 .mkv/.mov/.flac… 能在列表里显示、却
+// **永远进不了索引**。后果很隐蔽又很难查：索引里没有它 → 拿不到 sha1 →
+// /meta/poster 只认索引里的 sha1 → 海报一直 404（刮削下来的封面也读不回来）。
+// 两类清单必须同源，否则很容易再次错位。
+var (
+	imageExts = []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".avif"}
+	audioExts = []string{".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".wma"}
+	videoExts = []string{".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".m3u8", ".ts"}
+)
+
+// MediaExts 纳入索引的媒体扩展名（小写，不区分大小写匹配）；由上面三组拼出。
+var MediaExts = func() []string {
+	out := make([]string, 0, len(imageExts)+len(audioExts)+len(videoExts))
+	out = append(out, imageExts...)
+	out = append(out, audioExts...)
+	return append(out, videoExts...)
+}()
+
+// MediaKindOf 按扩展名给出媒体类型（图片/音频/视频/未知）。
+// 索引收录、浏览列表、元数据提取都走它 —— "列表里认得出的，索引就一定要收"。
+func MediaKindOf(name string) int {
+	ext := strings.ToLower(filepath.Ext(name))
+	switch {
+	case hasExt(imageExts, ext):
+		return models.MediaImage
+	case hasExt(audioExts, ext):
+		return models.MediaAudio
+	case hasExt(videoExts, ext):
+		return models.MediaVideo
+	}
+	return models.MediaUnknown
+}
+
+func hasExt(list []string, ext string) bool {
+	for _, want := range list {
+		if ext == want {
+			return true
+		}
+	}
+	return false
+}
 
 // Record 索引的一行：一个媒体文件。字段名与用户约定一致。
 type Record struct {
@@ -33,15 +76,9 @@ type Record struct {
 	Artist      string `json:"artist,omitempty"`       // 作者/艺术家（索引时从文件标签提取）
 }
 
-// isMediaName 是否是需要索引的媒体文件。
+// isMediaName 是否是需要索引的媒体文件：与 MediaKindOf 同源，别在这里另列一份扩展名。
 func isMediaName(name string) bool {
-	ext := strings.ToLower(filepath.Ext(name))
-	for _, want := range MediaExts {
-		if ext == want {
-			return true
-		}
-	}
-	return false
+	return MediaKindOf(name) != models.MediaUnknown
 }
 
 // IsSHA1 是否合法的 sha1（40 个十六进制字符）。大小写均可。
@@ -58,15 +95,16 @@ func IsSHA1(s string) bool {
 	return true
 }
 
-// PosterRel 海报图的相对路径（相对存储根）。
+// PosterRel 海报图的相对路径（相对 meta_dir / 元数据根）。
 // sha1 取首 2 字符作一级目录、次 2 字符作二级目录、其余作文件名。
-// 例：sha1=abcd123...98 → .mocca/ab/cd/123...98.png
+// 例：sha1=abcd123...98 → ab/cd/123...98.png
+// 注意：路径不再带 .mocca 前缀；.mocca 目录本身就是 meta_dir（见 drivers 的 MetaRoot）。
 func PosterRel(sha1hex string) (string, error) {
 	return metaRel(sha1hex, ".png")
 }
 
-// SummaryRel 附加信息文件的相对路径（相对存储根）。内容仍是 JSON，扩展名用 .meta。
-// 例：sha1=abcd123...98 → .mocca/ab/cd/123...98.meta
+// SummaryRel 附加信息文件的相对路径（相对 meta_dir / 元数据根）。内容仍是 JSON，扩展名用 .meta。
+// 例：sha1=abcd123...98 → ab/cd/123...98.meta
 func SummaryRel(sha1hex string) (string, error) {
 	return metaRel(sha1hex, ".meta")
 }
@@ -76,7 +114,7 @@ func metaRel(sha1hex, ext string) (string, error) {
 	if !IsSHA1(sha1hex) {
 		return "", errors.Errorf("非法 sha1: %q", sha1hex)
 	}
-	return filepath.Join(".mocca", sha1hex[0:2], sha1hex[2:4], sha1hex[4:]+ext), nil
+	return filepath.Join(sha1hex[0:2], sha1hex[2:4], sha1hex[4:]+ext), nil
 }
 
 // jsonMarshal 压缩序列化一行：走 map 让标准库按 key 升序输出，

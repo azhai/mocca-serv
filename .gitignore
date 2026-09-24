@@ -45,9 +45,10 @@ repos/
 uploads/
 
 # IDE
-.ai-memory/findings.md
-.ai-memory/progress.md
-.ai-memory/task_plan.md
+.ai-memory/adr/
+findings.md
+progress.md
+task_plan.md
 .arts/
 .codearts/
 .codebuddy/
@@ -56,6 +57,7 @@ uploads/
 .superpowers/
 .trae/
 .vscode/
+.workbuddy/
 *.swp
 *.swo
 *~

@@ -20,6 +20,12 @@ type Storage struct {
 	Modified            time.Time `json:"modified"`
 }
 
+// SettingFsWatch settings 表里控制「媒体文件监控（FS Watch）」的键。
+//
+// 放在 models 而不是某个 handler 里：启动流程（main）与后台开关（handlers）
+// 都要读它，谁都不该为了一个字符串常量去依赖对方。
+const SettingFsWatch = "fs_watch"
+
 // Setting 运行期配置项（是否开放注册、签名有效期等），避免为新开关改表结构。
 type Setting struct {
 	ID    uint   `json:"id" goe:"pk"`

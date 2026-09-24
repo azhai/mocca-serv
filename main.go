@@ -15,6 +15,7 @@ import (
 
 	"github.com/azhai/mocca/config"
 	"github.com/azhai/mocca/drivers"
+	"github.com/azhai/mocca/helpers"
 	"github.com/azhai/mocca/mediaindex"
 	"github.com/azhai/mocca/middlewares"
 	"github.com/azhai/mocca/models"
@@ -25,9 +26,14 @@ import (
 )
 
 func main() {
+	// 兜底：main goroutine 里的 panic 也要留痕。写进错误日志后按非零码退出，
+	// 是否重启交给守护进程（systemd / gorch 之类）决定。
+	// 必须直接 defer RecoverExit：包进匿名函数会让 recover 失效（见其注释）。
+	defer helpers.RecoverExit("main", 1)
+
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("载入配置失败: %+v", errors.WithStack(err))
+		helpers.Fatalf("启动", "载入配置失败: %+v", errors.WithStack(err))
 	}
 	if cfg.EnvLoaded {
 		log.Printf("已载入配置文件 %s", cfg.EnvFile)
@@ -35,12 +41,20 @@ func main() {
 		log.Printf("配置文件 %s 不存在，使用环境变量与内置默认值", cfg.EnvFile)
 	}
 
+	// 错误日志（panic 与致命错误的落点）：数据目录已知就得先打开，
+	// 后面任何一步崩了才有地方记。打开失败只提醒，不阻断启动。
+	if err := helpers.OpenErrorLog(cfg.DataDir); err != nil {
+		log.Printf("打开错误日志失败，崩溃信息只会写标准错误: %v", err)
+	} else {
+		defer func() { _ = helpers.CloseErrorLog() }()
+	}
+
 	// 隐藏目录要在任何写入之前就绪
 	if err := models.EnsureHiddenDirs(cfg.DataDir); err != nil {
-		log.Fatalf("创建隐藏目录失败: %+v", errors.WithStack(err))
+		helpers.Fatalf("启动", "创建隐藏目录失败: %+v", errors.WithStack(err))
 	}
 	if _, err := models.Open(cfg.DBFile); err != nil {
-		log.Fatalf("打开数据库失败: %+v", errors.WithStack(err))
+		helpers.Fatalf("启动", "打开数据库失败: %+v", errors.WithStack(err))
 	}
 	defer func() { _ = models.Close() }()
 
@@ -71,7 +85,7 @@ func main() {
 	// 连上库之后、服务启动之前：一个管理员都没有就用配置里的口令播种管理员。
 	// 否则新装的服务无人能进管理后台，连存储都配不上。
 	if created, err := models.EnsureAdmin(cfg.AdminPassword); err != nil {
-		log.Fatalf("初始化管理员失败: %+v", errors.WithStack(err))
+		helpers.Fatalf("启动", "初始化管理员失败: %+v", errors.WithStack(err))
 	} else if created {
 		log.Printf("!!! 已创建管理员 %s / %s —— 请立刻登录并修改密码 !!!",
 			models.DefaultAdminName, cfg.AdminPassword)
@@ -79,7 +93,8 @@ func main() {
 
 	// 服务启动对每个启用存储先全量索引一次：文件监控只做增量刷新、凭空不会生成索引，
 	// 首次挂载若没有 .index.jsonl 浏览端会一片空白。后台执行，失败不阻断启动。
-	go func() {
+	// 走 GoSafe：这活儿要遍历整棵目录树，单个存储的异常不该让进程消失。
+	helpers.GoSafe("启动索引", func() {
 		storages, lerr := models.ListStorages()
 		if lerr != nil {
 			log.Printf("启动索引失败: %v", lerr)
@@ -98,10 +113,13 @@ func main() {
 				log.Printf("存储 %s 已索引 %d 个媒体文件", s.MountPath, n)
 			}
 		}
-	}()
+	})
 
 	root := echo.New()
 
+	// panic 兜底必须挂在最外层（第一个 Use）：中间件是洋葱模型，
+	// 先注册的包住后面所有中间件与 handler，才接得住最里层抛上来的 panic。
+	root.Use(middlewares.RecoverLog())
 	// 请求体上限：防止超大请求把磁盘写满
 	root.Use(middlewares.BodyLimit(middlewares.DefaultMaxBody))
 	// 请求日志：排障第一手材料，慢请求会被标注
@@ -115,7 +133,7 @@ func main() {
 	// 两种构建共用一个 main，差异全部收在 web 包里（见 web/embed.go 与 web/noweb.go）。
 	if web.Embedded {
 		if err := web.Register(root, "/admin"); err != nil {
-			log.Fatalf("挂载页面失败: %+v", errors.WithStack(err))
+			helpers.Fatalf("启动", "挂载页面失败: %+v", errors.WithStack(err))
 		}
 		log.Printf("浏览应用已挂载：%s/ （管理后台在 %s/admin/）", cfg.Addr, cfg.Addr)
 	} else {
@@ -137,19 +155,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// 媒体文件监控：本地存储有文件增删改时，增量刷新所在目录的 .index.jsonl
-	go func() {
-		if err := mediaindex.WatchStorages(ctx, log.Printf); err != nil {
+	// 媒体文件监控（FS Watch）：本地存储有文件增删改时增量刷新所在目录的 .index.jsonl。
+	// **默认关闭**：inotify/kqueue 在大目录树上要登记每个子目录，代价不小，
+	// 所以做成后台「全局选项」里的开关，只有在库里显式打开才拉起。
+	if models.SettingBool(models.SettingFsWatch, false) {
+		if err := mediaindex.Watch.Start(log.Printf); err != nil {
 			log.Printf("启动文件监控失败: %v", err)
 		}
-	}()
+		log.Printf("文件监控（FS Watch）已开启")
+	} else {
+		log.Printf("文件监控（FS Watch）未开启，可在后台「全局选项」打开")
+	}
 
-	go func() {
+	helpers.GoSafe("http 服务", func() {
 		log.Printf("mocca 监听 %s（数据目录 %s）", cfg.Addr, cfg.DataDir)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("服务异常退出: %+v", err)
+			helpers.Fatalf("服务", "服务异常退出: %+v", err)
 		}
-	}()
+	})
 
 	<-ctx.Done()
 	log.Println("收到退出信号，正在优雅关闭…")

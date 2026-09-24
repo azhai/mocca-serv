@@ -276,20 +276,37 @@ function gridPager() {
 // driveURL 取可直接播放/预览的地址。
 // 用 /fs/get 的 raw_url 而不是自己拼 /d：URL 形态归服务端管（含令牌、含受保护目录）。
 // 受保护目录的密码不在 raw_url 里（服务端取流要 ?password=），这里补上。
+// absURL 把服务端给的 /d 地址补成绝对地址，并附上受保护目录的密码
+// （服务端取流要 ?password=，而 raw_url / hls_url 里都没有）。上游直链原样返回。
+function absURL(u, pw) {
+  if (!u) return '';
+  if (/^https?:/i.test(u)) return u;
+  if (pw) u += (u.includes('?') ? '&' : '?') + 'password=' + encodeURIComponent(pw);
+  return location.origin + u;
+}
+
 async function driveURL(p) {
   if (state.urlOf.has(p)) return state.urlOf.get(p);
   const body = { path: p };
   const pw = pwdFor(p);
   if (pw) body.password = pw;
   const d = await api('/fs/get', { method: 'POST', body });
-  let url = d.raw_url || ('/d' + encPath(p));
-  if (/^https?:/i.test(url)) { /* 上游直链，原样返回 */ }
-  else {
-    if (pw) url += (url.includes('?') ? '&' : '?') + 'password=' + encodeURIComponent(pw);
-    url = location.origin + url;
-  }
+  const url = absURL(d.raw_url || ('/d' + encPath(p)), pw);
   state.urlOf.set(p, url);
   return url;
+}
+
+// driveMedia 播放取址：除 Range 直链（raw_url）外，还取旁路 HLS 清单（hls_url）。
+// **有清单就优先走 HLS，没有就仍走直链**。刻意不缓存：切分完成后重新打开即可切到 HLS。
+async function driveMedia(p) {
+  const body = { path: p };
+  const pw = pwdFor(p);
+  if (pw) body.password = pw;
+  const d = await api('/fs/get', { method: 'POST', body });
+  return {
+    url: absURL(d.raw_url || ('/d' + encPath(p)), pw),
+    hls: d.hls_url ? absURL(d.hls_url, pw) : '',
+  };
 }
 
 // encPath 逐段编码路径：文件名里的空格、中文、#?% 都要编码，否则取流会取错文件。
@@ -330,14 +347,39 @@ function stripNameExt(n) {
 /* ── 管理员编辑 ────────────────────────────────────── */
 // openEdit 打开编辑弹窗，先取现有元数据回填（避免白改覆盖）。
 // 表单字段随媒体类型变化：图片只留简介；音频用主唱/伴唱/演奏 + 语言；视频用导演/主演等。
-async function openEdit(e) {
+//
+// prefill 可选：已在手边的刮削结果（检索候选 + apply 的回包）。
+//
+// 为什么要有 prefill：光靠"落盘后再读一次 /fs/info"来回填并不可靠 —— 那一环要先把文件
+// 解析出 sha1 才读得到 .mocca，解析不到就整片空白。apply 的回包**本身就是刮削结果**，
+// 所以它必须能独立把表单填起来，不依赖任何二次请求。
+//
+// 顺序因此很关键：**prefill 先同步落进表单**，`/fs/info` 只负责用设备侧已有内容去覆盖。
+// （早先的写法是把 prefill 放在 `await api('/fs/info')` 之后的 try 里，那一环一抛错就跳进
+// catch、prefill 整包丢掉 —— 兜底恰好在它要兜的场景里不生效，表现就是"刮了却什么都没填"。）
+// 取值顺序：已落盘的 .mocca > prefill > 空（刮削是补齐不是重置）。
+//
+// **文件名刻意不碰**：它就是重命名入口，填成 TMDB 片名会让一次"保存"顺手改名，
+// 而改名会动到存储上的真实文件（也可能破坏别人的硬链接/种子做种），所以只由用户手改。
+async function openEdit(e, prefill) {
   const p = e.path || joinPath(state.path, e.name);
+  const pre = prefill || {};
   state.edit = {
     path: p, kind: e.type || KIND.video,
     name: stripNameExt(e.name),
-    summary: '', director: '', cast: '', year: '', region: '', studio: '',
-    language: '', lead: '', backing: '', instrument: '',
+    summary: pre.overview || '',
+    director: pre.director || '',
+    // 主演两边都可能是数组（.mocca 与 apply 回包），统一用 / 连接
+    cast: (pre.cast || []).join('/'),
+    year: pre.year || '',
+    region: pre.region || '', studio: pre.studio || '',
+    language: pre.language || '',
+    lead: '', backing: '', instrument: '',
     posterTS: 0, shotSec: '1', loading: true,
+    // TMDB 刮削：scrapeKey 是可改的检索词（留空由后端按文件名猜）。
+    // 片名填进检索框：下次再刮可以直接用这个关键词，不用重新猜。
+    // scrape 存这次检索到的候选与选中项，供"同名电影换一部"，见 scrapeUI。
+    scrapeKey: pre.title || '', scrape: null, scrapeBusy: false,
   };
   m.redraw();
   try {
@@ -347,20 +389,28 @@ async function openEdit(e) {
     const d = await api('/fs/info', { method: 'POST', body });
     const meta = (d && d.meta) || {};
     if (state.edit && state.edit.path === p) {
+      // 设备侧 .mocca 优先，逐字段 `||` 兜回表单里已有的 prefill：
+      // 设备上有值就覆盖，没有就保留刚填进去的刮削结果。
+      // 文件名不接候选片名：它是重命名入口，只保留设备上真实的文件名。
       state.edit.name = meta.title || stripNameExt(e.name);
-      state.edit.summary = meta.summary || '';
-      state.edit.director = meta.director || '';
-      state.edit.cast = (meta.cast || []).join('/');
-      state.edit.year = meta.year || '';
-      state.edit.region = meta.region || '';
-      state.edit.studio = meta.studio || '';
-      state.edit.language = meta.language || '';
+      state.edit.scrapeKey = meta.title || pre.title || '';
+      state.edit.summary = meta.summary || state.edit.summary;
+      state.edit.director = meta.director || state.edit.director;
+      state.edit.cast = (meta.cast && meta.cast.length ? meta.cast : (pre.cast || [])).join('/');
+      state.edit.year = meta.year || state.edit.year;
+      state.edit.region = meta.region || state.edit.region;
+      state.edit.studio = meta.studio || state.edit.studio;
+      state.edit.language = meta.language || state.edit.language;
       state.edit.lead = (meta.lead || []).join(', ');
       state.edit.backing = (meta.backing || []).join(', ');
       state.edit.instrument = (meta.instrument || []).join(', ');
-      state.edit.loading = false;
     }
-  } catch (err) { if (state.edit) state.edit.loading = false; say(err.message, true); }
+  } catch (err) {
+    // 读设备侧信息失败只影响"覆盖"这一步，已经填进表单的刮削结果原样保留。
+    say(err.message, true);
+  } finally {
+    if (state.edit) state.edit.loading = false;
+  }
   m.redraw();
 }
 
@@ -410,6 +460,22 @@ async function uploadCover(ed, file) {
   m.redraw();
 }
 
+// removeCover 删除封面：POST /fs/uncov，成功后刷新预览（预览会取到 404，即"没有封面"）。
+// 与上传/截图相对：那两条是替换，这条是清空 —— 清掉之后再刮削会重新取 TMDB 海报。
+async function removeCover(ed) {
+  if (ed.loading) return;
+  const sure = window.confirm('确定删除当前封面吗？删除后可以重新上传、截图或再刮削一次。');
+  if (!sure) return;
+  ed.loading = true; m.redraw();
+  try {
+    const d = await api('/fs/uncov', { method: 'POST', body: { path: ed.path } });
+    coverRev++;                // 封面没了也要换 URL，否则浏览器还显示缓存里的旧图
+    ed.posterTS = Date.now();  // 同理：强制预览重新请求
+    say(d && d.removed === false ? '本来就没有封面' : '封面已删除');
+  } catch (err) { say(err.message, true); }
+  ed.loading = false; m.redraw();
+}
+
 // doShot 用 FFmpeg 截取视频指定时间点的帧作封面，成功后刷新预览。
 // 时间点接受秒数或「时:分:秒」（如 1:30 或 1:02:30），由后端 normalizeShotSec 统一交给 ffmpeg。
 async function doShot(ed) {
@@ -424,6 +490,236 @@ async function doShot(ed) {
   } catch (err) { say(err.message, true); }
   ed.loading = false; m.redraw();
 }
+/* ── TMDB 刮削（视频） ───────────────────────────────── */
+// pickBestCandidate 从候选里挑最可能是"这一部"的那条：优先年份与文件名对得上的。
+//
+// 同名电影多（翻拍、续集、译名撞车）时，"第一条"经常是别的年份那部 —— 盲取第一条正是
+// "刮到的电影是错的"的来源。文件名里的年份是手边最可信的线索（猜关键词时就解析出来了），
+// 所以先用它筛一遍；一条都不对再退回第一条。
+function pickBestCandidate(list, year) {
+  if (!list || !list.length) return null;
+  if (year) {
+    const hit = list.find(c => Number(c.year) === Number(year));
+    if (hit) return hit;
+  }
+  return list[0];
+}
+
+// formKeepMask 把表单里**此刻已经有内容**的字段报给后端（见后端 ScrapeKeep）。
+// 覆盖与否以表单为准而不是 .mocca：用户在表单里把某格清空，就是想让它被重新填上。
+function formKeepMask(ed) {
+  return {
+    summary: !!String(ed.summary || '').trim(),
+    director: !!String(ed.director || '').trim(),
+    cast: !!String(ed.cast || '').trim(),
+    year: !!String(ed.year || '').trim(),
+  };
+}
+
+// formSnapshot 记下"刮削前这份文件长什么样"，供候选里的「原始数据」还原。
+//
+// 为什么需要：刮削是**直接覆盖 .mocca** 的，而同名电影很容易连点错几条 —— 总得有路回到原点。
+// 地区/出品方/语言虽然不在表单上显示，openEdit 也把它们存进了 state.edit，一并带上：
+// /fs/edit 是按提交内容整体写入的，漏了哪项就等于把哪项清空。
+function formSnapshot(ed) {
+  return {
+    summary: ed.summary || '', director: ed.director || '', cast: ed.cast || '',
+    year: ed.year || '', region: ed.region || '', studio: ed.studio || '',
+    language: ed.language || '', lead: ed.lead || '', backing: ed.backing || '',
+    instrument: ed.instrument || '',
+  };
+}
+
+// scrapeState 把这次的检索结果与"原始数据"合成一份界面状态。
+// original / keepCover 只在**首次检索**时确定，换一部时要沿用 —— 否则"原始数据"
+// 会变成"上一条候选"，封面也会被误判成"原本就有"而删不掉。
+function scrapeState(prev, picked, list, fileYear, original, res) {
+  prev = prev || {};
+  return {
+    list, pickedId: picked.id, fileYear,
+    original: original || prev.original || null,
+    // keepCover：还原时不要动封面。封面本来就是这次刮削加上去的话（poster_kept 为假），
+    // 还原就得把它删掉才算回到原样。apply 失败时拿不到这个信息，按"别动"处理更安全。
+    keepCover: original ? (!res || !!res.poster_kept) : prev.keepCover !== false,
+  };
+}
+
+// applyCandidate 把选中的那条候选装进文件，并把结果拆进表单。
+//
+// opts.keep：表单状态 → 只补空缺（首次刮削）；`{}`（全 false）→ 整部替换（用户点了"换一部"）。
+// opts.list / opts.fileYear：挂回界面用，同名电影方便换一部（见 scrapeUI 的候选卡片）。
+// opts.fallback：apply 失败时用来兜底填表单的详情（后端顺带带回的第一条）。
+// opts.original：首次刮削时传进来的"刮削前快照"；opts.scrape：换一部时沿用的上一次状态。
+async function applyCandidate(ctx, picked, opts = {}) {
+  const { list = [], fileYear = 0, fallback = null, keep = null, original = null, scrape = null } = opts;
+  let res = null, applyErr = '';
+  try {
+    res = await api('/fs/scrape/apply', { method: 'POST', body: {
+      path: ctx.path, tmdb_id: picked.id, keep,
+    } });
+    // 只有真换了封面才动版本号：posterURL 里带着它，一改会让整页卡片的封面全部重拉一次。
+    if (!res.poster_kept) coverRev++;
+  } catch (err) { applyErr = err.message; }
+
+  // 重建编辑态并把结果拆进对应字段（文件名始终不动，那是重命名入口）。
+  await openEdit({ path: ctx.path, name: ctx.name, type: ctx.kind },
+    scrapeToFields(res || fallback || picked, picked));
+  // openEdit 会重建 state.edit，候选列表与选中态要在它之后再挂上去（否则被清掉）
+  const ed = state.edit;
+  const got = res || fallback || picked;
+  if (ed && ed.path === ctx.path) {
+    ed.scrape = scrapeState(scrape, picked, list, fileYear, original, res);
+    ed.scrapeBusy = false;
+  }
+
+  // 提示统一放最后说：提示条只有一个槽位，openEdit 里 /fs/info 的报错会先 say 一次，
+  // 先说的那条（"已刮削：xxx"）会被它冲掉，用户就不知道封面到底换没换。
+  const title = got.title || picked.title;
+  if (applyErr) {
+    say(`刮削写入失败：${applyErr}（已把检索到的信息填入表单，可手动保存）`, true);
+  } else if (res && res.poster_kept) {
+    // 只补空缺：已有内容与封面都原样保留，明确说一句，免得以为刮削没生效。
+    say(`已刮削：${title}（已有内容与封面均保留）`);
+  } else if (res) {
+    say(res.poster ? `已刮削：${title}` : `已刮削：${title}（封面未更新：${res.poster_error}）`, !res.poster);
+  }
+  // 同名电影最常踩的坑：年份对不上就明确点出来，别让人以为刮对了
+  if (fileYear && got.year && Math.abs(Number(got.year) - Number(fileYear)) > 1) {
+    say(`注意：检索到的是 ${got.year} 年的《${title}》，与文件名里的 ${fileYear} 不符，可在下方换一部`, true);
+  }
+}
+
+// scrapeSearch 刮削：检索 → 挑最可能是这一部的那条 → 装进文件并回填表单。
+//
+// 同名电影多，所以**不盲取第一条**：优先年份与文件名对得上的（pickBestCandidate），
+// 并把候选条留在界面上，一眼不对可以直接换一部（scrapeUI 里的候选按钮）。
+// 一条都没对上、或候选里根本没有那一部时，改上面的片名（可带年份）再刮一次。
+async function scrapeSearch(ed) {
+  if (ed.scrapeBusy) return;
+  ed.scrapeBusy = true; m.redraw();
+  const ctx = { path: ed.path, kind: ed.kind, name: ed.name };
+  // 这两个都必须在 openEdit 重建编辑态**之前**取走：keep 是表单当前状态，
+  // original 是"刮削前长什么样"的快照（供候选里的「原始数据」还原）。
+  const keep = formKeepMask(ed);
+  const original = formSnapshot(ed);
+  try {
+    const d = await api('/fs/scrape', { method: 'POST', body: {
+      path: ctx.path, keyword: (ed.scrapeKey || '').trim(),
+    } });
+    const list = d.candidates || [];
+    const picked = pickBestCandidate(list, d.year);
+    if (!picked) {
+      say(`没找到「${d.keyword}」的候选，换个关键词再试`);
+      ed.scrapeBusy = false; m.redraw();
+      return;
+    }
+    // 后端顺带带回的 detail 只对第一条有意义，故选中的就是它时才拿来兜底
+    const fallback = d.detail && d.detail.tmdb_id === picked.id ? d.detail : null;
+    await applyCandidate(ctx, picked, { list, fileYear: d.year, fallback, keep, original });
+  } catch (err) { say(err.message, true); }
+  ed.scrapeBusy = false; m.redraw();
+}
+
+// restoreOriginal 还原成刮削前的资料 —— 候选里那张「原始数据」卡片。
+//
+// 刮削是直接覆盖 .mocca 的，同名电影又容易连点错几条，这里给一条回到原点的路。
+// 复用「保存」那条通道（/fs/edit 整体写入），所以地区/出品方/语言等不在表单上的项
+// 也在快照里带着，不会被顺手清空；封面若本来就是这次刮削加上去的，一并删掉才算回到原样。
+async function restoreOriginal(ed) {
+  const sc = ed.scrape || {};
+  const o = sc.original;
+  if (!o) { say('没有可还原的原始资料', true); return; }
+  const split = (s) => String(s || '').split(/[,/]/).map(x => x.trim()).filter(Boolean);
+  const ctx = { path: ed.path, kind: ed.kind, name: ed.name };
+  ed.loading = true; m.redraw();
+  let err = '';
+  try {
+    await api('/fs/edit', { method: 'POST', body: {
+      path: ctx.path,
+      name: '',   // 空 = 不改名；改名只走表单里那个入口
+      summary: o.summary, director: o.director, year: parseInt(o.year, 10) || 0,
+      cast: split(o.cast), region: o.region, studio: o.studio, language: o.language,
+      lead: split(o.lead), backing: split(o.backing), instrument: split(o.instrument),
+    } });
+    if (!sc.keepCover) {
+      try {
+        await api('/fs/uncov', { method: 'POST', body: { path: ctx.path } });
+      } catch (e) { /* 删封面失败不影响文字还原，下面照样读回设备侧内容 */ }
+      coverRev++;
+    }
+  } catch (e) { err = e.message; }
+
+  // 重建编辑态，让表单显示还原后的内容（/fs/info 会读回刚写进去的 .mocca）
+  await openEdit(ctx, {
+    overview: o.summary, director: o.director, cast: split(o.cast),
+    year: parseInt(o.year, 10) || 0, region: o.region, studio: o.studio, language: o.language,
+  });
+  const cur = state.edit;
+  if (cur && cur.path === ctx.path) {
+    cur.scrape = { ...sc, pickedId: '__raw' };
+    cur.scrapeBusy = false;
+  }
+  say(err ? `还原失败：${err}` : '已还原为刮削前的资料', !!err);
+}
+
+// rawTip 「原始数据」卡片的 hover tip：把要还原成什么写清楚，省得点下去才发现是空的。
+function rawTip(o) {
+  return [
+    '还原成刮削前的资料',
+    `简介：${o.summary || '（空）'}`,
+    `导演：${o.director || '（空）'}　年份：${o.year || '（空）'}`,
+    `主演：${o.cast || '（空）'}`,
+  ].join('\n');
+}
+
+// candTip 候选的 hover tip：卡片上只放封面和主演 —— 同名时片名一模一样，
+// 真正能认出是哪一部的就只有这两样；其余信息（片名、年份、原名、评分、简介）全放这里。
+function candTip(c) {
+  const head = `${c.title}${c.year ? `（${c.year}）` : ''}`;
+  const meta = [
+    c.original_title && c.original_title !== c.title ? `原名 ${c.original_title}` : '',
+    c.vote_average ? `TMDB ${Number(c.vote_average).toFixed(1)}` : '',
+  ].filter(Boolean).join(' · ');
+  // 空行分隔：原生 tooltip 不换行排版，靠空行把标题区和简介分开才有可读性
+  return [head, meta, c.overview].filter(Boolean).join('\n');
+}
+
+// scrapePickAgain 换一部：用户明确要换成这条，所以**整部替换**（keep 传空对象 = 全不保留），
+// 而不是像首次刮削那样只补空缺 —— 否则上一次刚填进去的资料会把新的一条全挡住。
+async function scrapePickAgain(ed, id) {
+  if (ed.scrapeBusy) return;
+  const sc = ed.scrape || {};
+  const picked = (sc.list || []).find(c => c.id === id);
+  if (!picked) { say('该候选已失效，请重新刮削', true); return; }
+  ed.scrapeBusy = true; m.redraw();
+  const ctx = { path: ed.path, kind: ed.kind, name: ed.name };
+  try {
+    // scrape: sc —— 沿用原有的「原始数据」快照与封面判定，
+    // 否则换一部之后"原始"就变成"上一条候选"了。
+    await applyCandidate(ctx, picked, { list: sc.list, fileYear: sc.fileYear, keep: {}, scrape: sc });
+  } catch (err) { say(err.message, true); }
+  ed.scrapeBusy = false; m.redraw();
+}
+
+// scrapeToFields 把一处刮削结果**拆成表单字段**。
+//
+// 两个来源的字段名并不一样，混在一起最容易填错位，所以只在这一个函数里定映射：
+//   - 候选（/fs/scrape 的 candidates）：title / year / overview（短说明）
+//   - apply 回包（/fs/scrape/apply）：title / year / summary / director / cast / region / studio / language
+// 回包优先（它是刚落盘、最权威的那份），候选兜底（回包拿不到时至少还有片名/年份/简介）。
+function scrapeToFields(d, picked) {
+  d = d || {}; picked = picked || {};
+  const cast = (d.cast && d.cast.length ? d.cast : picked.cast) || [];
+  return {
+    title: d.title || picked.title,          // → 刮削检索框（不碰文件名）
+    year: d.year || picked.year,             // → 年份
+    overview: d.summary || picked.overview,  // → 简介
+    director: d.director,                    // → 导演
+    cast: cast,                              // → 主演（数组，openEdit 里用 / 连接）
+    region: d.region, studio: d.studio, language: d.language,
+  };
+}
+
 async function deleteFile() {
   const ed = state.edit;
   if (!ed || ed.loading) return;
@@ -546,18 +842,63 @@ async function revealPath(p) {
 
 /* ── 媒体播放与图片预览 ───────────────────────────────── */
 async function play(p, entry) {
-  // 正常走 /fs/get 拿 raw_url；失败时退回 /d 直链（与列表同一路径口径，
-  // 列表能看则直链大概率可播）—— 即封面点击直接链接到真正的视频文件。
-  let url;
-  try { url = await driveURL(p); }
-  catch (e) { url = location.origin + directURL(p); }
-  state.player = { kind: entry.type === KIND.video ? 'video' : 'audio', url, name: entry.name };
+  // 地址走 /fs/get：raw_url 是 Range 直链，hls_url 是旁路 m3u8 清单（可能没有）。
+  // 取不到就退回 /d 直链（与列表同一路径口径，列表能看则直链大概率可播）。
+  let url = location.origin + directURL(p), hls = '';
+  try { ({ url, hls } = await driveMedia(p)); } catch (e) { /* 用上面的直链兜底 */ }
+  state.player = { kind: entry.type === KIND.video ? 'video' : 'audio', url, hls, name: entry.name, path: p };
   m.redraw();
 }
 function closePlayer() {
   state.player = null;
   m.redraw();
 }
+
+// ── 播放进度续播 ───────────────────────────────────────────
+// 位置存 localStorage：浏览应用对游客（未登录）也开放，没有稳定的服务端账号可挂靠，
+// 存本地最简单，也不占后端表。键按文件路径，换设备不同步（要跨设备得存服务端）。
+const POS_PREFIX = 'mocca:pos:';
+const POS_MIN = 10;    // 不足 10 秒不值得续播
+const POS_TAIL = 10;   // 距结尾不足 10 秒视为已看完
+const POS_EVERY = 5;   // 播放中每 5 秒落一次盘
+
+function loadPos(path) {
+  try { return parseFloat(localStorage.getItem(POS_PREFIX + path)) || 0; } catch (e) { return 0; }
+}
+function savePos(path, t) {
+  if (!path || !isFinite(t) || t < 1) return;
+  try { localStorage.setItem(POS_PREFIX + path, String(Math.floor(t))); } catch (e) { /* 隐私模式写入失败：忽略 */ }
+}
+function clearPos(path) {
+  try { localStorage.removeItem(POS_PREFIX + path); } catch (e) { /* 同上 */ }
+}
+
+// attachMedia 给 <video>/<audio> 挂上「续播 + 记录进度」：
+//   - 元数据就绪后跳到上次位置（太靠前或接近结尾则从头）；
+//   - 播放中每 POS_EVERY 秒落一次，暂停/移除时再落一次；
+//   - 播完清掉记录，下次从头开始。
+function attachMedia(el, path) {
+  const saved = loadPos(path);
+  const jump = () => {
+    if (saved >= POS_MIN && (!isFinite(el.duration) || saved < el.duration - POS_TAIL)) el.currentTime = saved;
+  };
+  if (el.readyState >= 1) jump(); else el.addEventListener('loadedmetadata', jump, { once: true });
+
+  let last = 0;
+  el.addEventListener('timeupdate', () => {
+    if (Math.abs(el.currentTime - last) < POS_EVERY) return;
+    last = el.currentTime;
+    savePos(path, el.currentTime);
+  });
+  el.addEventListener('pause', () => savePos(path, el.currentTime));
+  el.addEventListener('ended', () => clearPos(path));
+}
+
+// 关页/切后台兜底落一次：timeupdate 未必刚好走到下一个 5 秒
+window.addEventListener('pagehide', () => {
+  const el = document.querySelector('.playbox video, .playerbar audio');
+  if (el && state.player) savePos(state.player.path, el.currentTime);
+});
 
 // 图片预览：左/右切换只在**当前目录的图片**里循环，切换时按需取地址。
 async function viewImage(p) {
@@ -851,7 +1192,11 @@ const PlayerBar = {
     if (!p || p.kind !== 'audio') return null;
     return m('.playerbar', [
       m('span.pt', { title: p.name }, `♪ ${p.name}`),
-      m('audio', { src: p.url, controls: true, autoplay: true }),
+      m('audio', {
+        src: p.url, controls: true, autoplay: true,
+        oncreate: v => attachMedia(v.dom, p.path),
+        onbeforeremove: v => savePos(p.path, v.dom.currentTime),
+      }),
       m('button.iconbtn.solid', { title: '关闭', onclick: closePlayer },
         m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.close }))),
     ]);
@@ -865,14 +1210,76 @@ function seekVid(delta) {
   v.currentTime = Math.min(Math.max(0, v.currentTime + delta), v.duration);
 }
 
+// ── HLS 播放（旁路清单优先，没有则回退 Range 直链） ──────────
+// hls.js 约 600KB，只在真的播 HLS 时才按需加载；它是本地文件（/js/hls.min.js），
+// 不走 CDN —— 局域网 http 与断网场景都要能播。
+let hlsLoading = null;
+let videoHls = null; // 当前视频的 Hls 实例：换片/关闭必须 destroy，否则后台还在拉分片
+
+function ensureHls() {
+  if (window.Hls) return Promise.resolve(window.Hls);
+  if (!hlsLoading) {
+    hlsLoading = new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = '/js/hls.min.js';
+      s.onload = () => res(window.Hls);
+      s.onerror = () => { hlsLoading = null; rej(new Error('hls.js 加载失败')); };
+      document.head.appendChild(s);
+    });
+  }
+  return hlsLoading;
+}
+
+function stopVideo() {
+  if (videoHls) { videoHls.destroy(); videoHls = null; }
+}
+
+// startVideo 挂上续播，有旁路清单时切到 HLS；HLS 用不了就退回 Range 直链。
+function startVideo(el, p) {
+  attachMedia(el, p.path);
+  if (!p.hls) return;
+  ensureHls().then(Hls => {
+    if (!Hls || !Hls.isSupported()) { el.src = p.hls; return; } // Safari 原生支持 HLS
+    // 清单里的分片是相对地址，相对解析会把查询串丢掉 → 分片请求会 401。
+    // 所以从清单地址里抽出取流凭证，交给 xhrSetup 补到**每一条**请求（清单与分片）上。
+    const [base, query] = p.hls.split('?');
+    const q = query ? '?' + query : '';
+    const h = new Hls({
+      xhrSetup: (xhr, url) => { xhr.open('GET', (!q || url.includes('?')) ? url : url + q, true); },
+    });
+    h.on(Hls.Events.ERROR, (_evt, data) => {
+      if (!data || !data.fatal) return;
+      stopVideo();
+      say('HLS 播放失败，已切回直链');
+      el.src = p.url; // 回退到 Range 直链
+    });
+    h.loadSource(base);
+    h.attachMedia(el);
+    videoHls = h;
+  }).catch(() => { el.src = p.url; }); // hls.js 都拉不到，退回直链
+}
+
 const VideoOverlay = {
   view() {
     const p = state.player;
     if (!p || p.kind !== 'video') return null;
     return m('.overlay', { onclick: e => { if (e.target === e.currentTarget) closePlayer(); } },
       m('.playbox', [
-        m('video', { src: p.url, controls: true, autoplay: true, playsinline: true }),
-        m('.pbar', [
+        m('video', {
+          // 有旁路清单时不设 src，交给 hls.js 接管；否则直接用 Range 直链。
+          // key 用路径：换片时强制重建元素，否则 mithril 复用同一个 <video>，
+          // oncreate 不再触发，旧的 hls 实例会赖着不放。
+          key: p.path,
+          src: p.hls ? undefined : p.url,
+          controls: true, autoplay: true, playsinline: true,
+          // 续播：元数据就绪即跳到上次位置；关闭/卸载时再落一次，避免只靠 5 秒节流丢进度
+          oncreate: v => startVideo(v.dom, p),
+          onbeforeremove: v => { savePos(p.path, v.dom.currentTime); stopVideo(); },
+        }),
+        // 与上面的 <video> 同属一个片段：mithril 要求片段内 vnode 要么全有 key、
+        // 要么全没有，只给 video 加 key 会直接报「In fragments, vnodes must either
+        // all have keys or none have keys」而整块渲染不出来。
+        m('.pbar', { key: 'pbar' }, [
           m('button.btn.ghost', { title: '后退 10 秒', onclick: () => seekVid(-10) }, '-10s'),
           m('button.btn.ghost', { title: '前进 10 秒', onclick: () => seekVid(10) }, '+10s'),
           m('span.pt', { title: p.name }, p.name),
@@ -951,29 +1358,43 @@ const EditModal = {
   view() {
     const ed = state.edit;
     if (!ed) return null;
+    // 每个控件都带上 name/id，名字就是它在 state.edit 里的字段名（year、director、cast…）。
+    // 值走 JS 绑定、不一定有 form 提交，但有了 name/id 才能按选择器定位/自动填表，
+    // 光靠"第几个输入框"或 type="number" 这种特征去认太脆。
+    // 统一 autocomplete="off"：这些是媒体元数据，浏览器自动填充只会塞进
+    // 用户名/电话之类完全无关的值，把字段"自动填错"，比不填更烦人。
     const field = (label, key, extra = {}) => m('label.fld', [
       m('span', label),
-      m('input', { value: ed[key], oninput: e => { ed[key] = e.target.value; }, ...extra }),
+      m('input', { name: key, id: 'fld-' + key, autocomplete: 'off', value: ed[key],
+        oninput: e => { ed[key] = e.target.value; }, ...extra }),
     ]);
     const textarea = m('label.fld.tarea', [
       m('span', '简介'),
-      m('textarea.slim', { value: ed.summary, rows: 4,
+      m('textarea.slim', { name: 'summary', id: 'fld-summary', autocomplete: 'off',
+        value: ed.summary, rows: 4,
         oninput: e => { ed.summary = e.target.value; } }),
     ]);
 
     // 封面：音/视频可上传替换；视频另外可用 FFmpeg 按秒数截图做封面。
     // 上下摆放：封面图在上、上传按钮、FFmpeg 截图（输入+按钮）在下。
     const coverUI = (ed.kind === KIND.video || ed.kind === KIND.audio)
-      ? m('.cover', [
-          m('img.cov', { src: posterURL(ed.path) + (ed.posterTS ? '&t=' + ed.posterTS : ''), alt: '当前封面' }),
+      ? m('.cover', { id: 'fld-cover' }, [
+          m('img.cov', { name: 'cover', id: 'cover-img',
+            src: posterURL(ed.path) + (ed.posterTS ? '&t=' + ed.posterTS : ''), alt: '当前封面' }),
           m('.cover-tools', [
+            // 删除封面放在上传封面左边：先"去掉不要的"，再"换成想要的"
+            m('button.btn.ghost.danger', {
+              disabled: ed.loading, title: '删除当前封面（之后可重新上传、截图或再刮削一次）',
+              onclick: () => guard(() => removeCover(ed)),
+            }, '删除封面'),
             m('label.btn.ghost', { title: '选择图片上传替换封面' },
               '上传封面',
-              m('input.file-in', { type: 'file', accept: 'image/*',
+              m('input.file-in', { name: 'cover-file', id: 'fld-cover-file', type: 'file', accept: 'image/*',
                 onchange: e => guard(() => uploadCover(ed, e.target.files[0])) })),
             ed.kind === KIND.video
               ? m('.shot', [
-                    m('input.shot-sec', { type: 'text', placeholder: '0:01 或 1:30',
+                    m('input.shot-sec', { name: 'shot-sec', id: 'fld-shot-sec', autocomplete: 'off',
+                      type: 'text', placeholder: '0:01 或 1:30',
                       value: ed.shotSec || '1', oninput: e => { ed.shotSec = e.target.value; } }),
                     m('button.btn.ghost', { disabled: ed.loading,
                       onclick: () => guard(() => doShot(ed)), title: '用 FFmpeg 截取指定时间点的帧作封面' },
@@ -984,7 +1405,65 @@ const EditModal = {
         ])
       : null;
 
-    // 字段随类型收敛：图片无附加信息；音频只有语言/作者；视频去掉出品方与地区，导演跟年份同一行。
+    // TMDB 刮削：一个可改的检索词 + 一个按钮，点下去直接落盘并回填表单（含封面）。
+    // 只给视频——TMDB 是影视库，音频/图片刮不出东西（后端也会拒）。
+    //
+    // 同名电影的选择：一行三个候选，卡片上只有**封面缩略图 + 主演** —— 同名时片名一模一样，
+    // 这两样才是选出"是哪一部"的依据；其余信息（片名/年份/原名/评分/简介）全部走 hover tip
+    // （见 candTip），不占版面。点一条即**整部替换**（见 scrapePickAgain），当前生效的高亮。
+    //
+    // 第一张固定是**「原始数据」**：刮削是直接覆盖 .mocca 的，点错几条之后要靠它回到原点
+    // （见 restoreOriginal）。它跟候选并排放在同一个可滚动区里，所以位置固定、一眼能看见。
+    const cards = [];
+    if (ed.scrape) {
+      const o = ed.scrape.original;
+      if (o) {
+        cards.push(m('button.cand.raw', {
+          key: '__raw', disabled: ed.scrapeBusy,
+          class: ed.scrape.pickedId === '__raw' ? 'on' : '',
+          title: rawTip(o),
+          onclick: () => guard(() => restoreOriginal(ed)),
+          // 只有一条竖排文字：这一列越窄，候选能分到的宽度越多（CSS 里是 36px）
+        }, m('.cand-c', '原始数据')));
+      }
+      ed.scrape.list.slice(0, 3).forEach(c => cards.push(m('button.cand', {
+        key: c.id, disabled: ed.scrapeBusy,
+        class: c.id === ed.scrape.pickedId ? 'on' : '',
+        title: candTip(c),
+        onclick: () => guard(() => scrapePickAgain(ed, c.id)),
+      }, [
+        m('.cand-thumb', c.poster
+          ? m('img', { src: c.poster, alt: c.title, loading: 'lazy',
+              onerror: ev => { ev.target.style.display = 'none'; } })
+          : m('span.ph', '无封面')),
+        m('.cand-c', (c.cast || []).slice(0, 3).join(' / ') || '（暂无主演）'),
+      ])));
+    }
+    // 只有一条候选、又没有可还原的原始资料时不摆 —— 表单已经就是它了
+    const cands = cards.length > 1 ? m('.cands', cards) : null;
+    const scrapeUI = ed.kind === KIND.video
+      ? m('.scrape', [
+          m('.scrape-head', [
+            m('input.scrape-key', {
+              name: 'scrape-key', id: 'fld-scrape-key', autocomplete: 'off',
+              placeholder: '片名（可带年份，如 无间道 2002）', value: ed.scrapeKey || '',
+              oninput: e => { ed.scrapeKey = e.target.value; },
+            }),
+            m('button.btn.ghost', {
+              disabled: ed.scrapeBusy,
+              title: '用 TMDB 检索并把匹配到的简介/导演/年份/主演与封面写入本文件；' +
+                '同名电影在下方的候选里换，仍不对就改上面的片名（带年份更准）再刮',
+              onclick: () => guard(() => scrapeSearch(ed)),
+            }, ed.scrapeBusy ? '处理中…' : 'TMDB 刮削'),
+          ]),
+          cands,
+        ])
+      : null;
+
+    // 字段随类型收敛：图片无附加信息；音频只有语言/作者；视频只要 导演/年份/主演/简介。
+    //
+    // 视频刻意**不给**地区、出品方、语言：刮削虽会带回这些值，但界面上不放 ——
+    // 放在表单里只会让几十条无关信息挤满一屏，而这几项日常几乎没人改。
     let fields;
     if (ed.kind === KIND.image) {
       fields = [];
@@ -995,9 +1474,12 @@ const EditModal = {
       ];
     } else { // 视频
       fields = [
+        scrapeUI,
         m('.fld-row', [
           field('导演', 'director'),
-          field('年份', 'year', { type: 'number', placeholder: '如 2014' }),
+          // 年份刻意不用 type="number"：它带上下箭头、还会被浏览器当数字框做校验，
+          // 而这里只是个年份文本。数字键盘靠 inputmode 提示即可。
+          field('年份', 'year', { inputmode: 'numeric', placeholder: '如 2014' }),
         ]),
         field('主演', 'cast', { placeholder: '用逗号或斜线分隔，空格自动去除' }),
         textarea,
@@ -1114,12 +1596,16 @@ async function init() {
   }
   m.redraw();
   if (state.token || state.guest) {
-    // URL 带 ?path=&page= 时按它进入（刷新/书签保持位置）；否则退回 hash 路由
-    const qp = new URLSearchParams(location.search);
-    const startPath = qp.get('path') ? urlStateFrom().path : pathFromHash();
-    const startPage = qp.get('path') ? urlStateFrom().page : 1;
+    // URL 带 ?path=&page= 时按它进入（刷新/书签保持位置）；否则退回 hash 路由。
+    //
+    // **path 与 page 必须各自独立解析**：根目录时 syncURL 刻意不写 path（地址保持干净），
+    // 所以"有没有 path"绝不能当作"要不要恢复 page"的前提 —— 否则在根目录翻页后刷新，
+    // page 被直接忽略，紧接着这次加载的 syncURL 又把它从 URL 里抹掉，页码彻底找不回来。
+    const st = urlStateFrom();
+    const hasPath = new URLSearchParams(location.search).has('path');
+    const startPath = hasPath ? st.path : pathFromHash();
     state.path = startPath;
-    state.page = startPage;
+    state.page = st.page;   // 没有 page 参数时默认为 1，不需要额外判断
     await openDir(startPath, { keepPage: true });
   }
 }

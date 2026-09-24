@@ -32,7 +32,13 @@ const (
 	keyDataDir       = "DATA_DIR"
 	keyJWTSecret     = "JWT_SECRET"
 	keyAdminPassword = "ADMIN_PASSWORD"
+	keyTmdbKey       = "TMDB_KEY"
+	keyTmdbLang      = "TMDB_LANG"
+	keyTmdbProxy     = "TMDB_PROXY"
 )
+
+// DefaultTmdbLang 刮削缺省语言：中文简介与译名。
+const DefaultTmdbLang = "zh-CN"
 
 // Config 运行期配置。命名与取值集中在这里，handler 不再散落读环境。
 type Config struct {
@@ -43,6 +49,16 @@ type Config struct {
 	TokenExpiresIn int    // 令牌有效期（小时）
 	AllowRegister  bool   // 是否开放注册
 	AdminPassword  string // 首个管理员的密码（播种 admin 时使用）
+
+	// TMDB 刮削。密钥可空：为空时刮削接口回一句「未配置 TMDB_KEY」而不是报错崩溃。
+	// v3 的 api_key 与 v4 的读令牌（JWT）都填这里，客户端按形态自动选鉴权方式。
+	TmdbAPIKey string
+	TmdbLang   string // 检索/详情的语言，缺省 zh-CN
+	// TmdbProxy 出网代理（如 http://127.0.0.1:7890），用于 api/image.tmdb.org 直连不通的环境。
+	// 留空则沿用 http.DefaultTransport 的行为 —— 它会读**进程环境**的 HTTPS_PROXY/HTTP_PROXY。
+	// 注意 config 只把自己认识的键读进结构、不会写进进程环境，所以「.env 里写 HTTPS_PROXY」
+	// 是不生效的；要走代理且在 .env 里配，就写这个 TMDB_PROXY。
+	TmdbProxy string
 
 	EnvFile   string // 实际读取的配置文件路径
 	EnvLoaded bool   // 该文件确实存在且读取成功
@@ -64,7 +80,10 @@ var Cfg *Config
 //	ADDR           / MOCCA_ADDR            监听地址
 //	DATA_DIR       / MOCCA_DATA_DIR        数据目录
 //	JWT_SECRET     / MOCCA_JWT_SECRET      令牌签名密钥
-//	ADMIN_PASSWORD / MOCCA_ADMIN_PASSWORD  首个管理员口令，缺省 Match/1
+//	ADMIN_PASSWORD / MOCCA_ADMIN_PASSWORD  首个管理员口令，缺省 @Mocca/1
+//	TMDB_KEY       / MOCCA_TMDB_KEY        TMDB 密钥（可空＝不启用刮削）
+//	TMDB_LANG      / MOCCA_TMDB_LANG       刮削语言，缺省 zh-CN
+//	TMDB_PROXY     / MOCCA_TMDB_PROXY      刮削出网代理（如 http://127.0.0.1:7890），留空＝直连
 func Load() (*Config, error) {
 	path := envFilePath()
 	env, loaded, err := loadEnv(path)
@@ -77,6 +96,9 @@ func Load() (*Config, error) {
 		DataDir:        pick(env, keyDataDir, "data"),
 		JWTSecret:      pick(env, keyJWTSecret, "mocca-dev-secret"),
 		AdminPassword:  pick(env, keyAdminPassword, DefaultAdminPassword),
+		TmdbAPIKey:     pick(env, keyTmdbKey, ""),
+		TmdbLang:       pick(env, keyTmdbLang, DefaultTmdbLang),
+		TmdbProxy:      pick(env, keyTmdbProxy, ""),
 		TokenExpiresIn: 48,   // 暂未开放成配置项
 		AllowRegister:  true, // 暂未开放成配置项
 		EnvFile:        path,

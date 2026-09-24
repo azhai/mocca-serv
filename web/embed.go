@@ -13,11 +13,17 @@
 package web
 
 import (
+	"bytes"
+	"crypto/sha1"
 	"embed"
+	"encoding/hex"
 	"io/fs"
 	"net/http"
 	"os"
+	"path"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/labstack/echo/v5"
 )
@@ -52,6 +58,46 @@ func serveFS() (fs.FS, error) {
 	return FS()
 }
 
+// diskMode 是否从磁盘读 public/（开发模式）。磁盘内容随时会变，不能缓存。
+func diskMode() bool { return os.Getenv("MOCCA_SERVE_DISK") != "" }
+
+// asset 一条静态资源：内容常驻内存 + 一个按内容算出来的 ETag。
+// 资源总共几百 KB，读一次存住比每次请求重读划算。
+type asset struct {
+	body []byte
+	etag string
+}
+
+var (
+	assetMu    sync.RWMutex
+	assetCache = map[string]*asset{}
+)
+
+// loadAsset 取（必要时缓存）某条资源的内容与 ETag。
+// immutable 为真才缓存：内嵌资源编译后就固定不变，磁盘模式下的文件随时会改。
+func loadAsset(fsys fs.FS, name string, immutable bool) (*asset, error) {
+	if immutable {
+		assetMu.RLock()
+		a, ok := assetCache[name]
+		assetMu.RUnlock()
+		if ok {
+			return a, nil
+		}
+	}
+	b, err := fs.ReadFile(fsys, name)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha1.Sum(b)
+	a := &asset{body: b, etag: `"` + hex.EncodeToString(sum[:]) + `"`}
+	if immutable {
+		assetMu.Lock()
+		assetCache[name] = a
+		assetMu.Unlock()
+	}
+	return a, nil
+}
+
 // Register 挂载浏览应用与后台。二进制自带资源，运行时不依赖任何外部目录。
 //
 // 页面入口：
@@ -82,7 +128,11 @@ func Register(e *echo.Echo, prefix string) error {
 	}
 	writeHTML := func(body []byte) echo.HandlerFunc {
 		return func(c *echo.Context) error {
-			c.Response().Header().Set("Content-Type", "text/html; charset=utf-8")
+			h := c.Response().Header()
+			h.Set("Content-Type", "text/html; charset=utf-8")
+			// 页面引用的是 /js/home.js 这种固定地址，页面本身被缓存住就会一直
+			// 指向同一份旧脚本 —— 每次回源校验，成本只有一个 1KB 的 200。
+			h.Set("Cache-Control", "no-cache")
 			_, err := c.Response().Write(body)
 			return err
 		}
@@ -97,18 +147,47 @@ func Register(e *echo.Echo, prefix string) error {
 	})
 	e.GET(prefix+"/", writeHTML(adminHTML))
 
+	// index.html 的地址规范到目录形式入口。这原是 http.FileServer 的规范化行为，
+	// 换成自己走 ServeContent 后得显式补上，否则同一份页面会有两个地址、各自可被缓存。
+	// （两个页面都用绝对路径引用资源，所以跳不跳对资源加载都没影响。）
+	e.GET("/index.html", func(c *echo.Context) error {
+		return c.Redirect(http.StatusMovedPermanently, "/")
+	})
+	e.GET(prefix+"/index.html", func(c *echo.Context) error {
+		return c.Redirect(http.StatusMovedPermanently, prefix+"/")
+	})
+
 	// 其余 GET 一律按静态文件处理。
-	// 结尾带 / 的是目录请求：css/ 与 js/ 里没有 index.html，FileServer 会回
+	// 结尾带 / 的是目录请求：css/ 与 js/ 里没有 index.html，文件服务器会回
 	// 目录列表把内嵌资源全列出来，这里直接 404 堵掉。
 	// 接口路由（/api/*、/d/*、/static/avatars/:key）是静态或参数路由，
 	// 优先级高于这里的 /* 通配，不会被静态文件服务器吃掉。
-	server := http.FileServer(http.FS(fsys))
+	//
+	// 这里不用 http.FileServer，而是自己走 ServeContent，只为把 ETag/Cache-Control
+	// 补上：//go:embed 的文件 ModTime 是**零值**，ServeContent 因此既不发 Last-Modified
+	// 也不发 ETag。一个没有任何验证器、也没有新鲜度的 200 响应，浏览器只能按启发式
+	// 规则把 home.js 缓存住，而且**没有东西可以回问**——于是「重新编译 + 重启服务」
+	// 根本不影响浏览器里那份旧 JS，前端改了也永远看不到，这是最难查的一类问题。
+	// 补上按内容算的 ETag 后：内容没变回 304（省掉 66KB 的 home.js），变了立刻生效。
+	immutable := !diskMode()
 	e.GET("/*", func(c *echo.Context) error {
-		if strings.HasSuffix(c.Request().URL.Path, "/") {
-			http.NotFound(c.Response(), c.Request())
+		req := c.Request()
+		if strings.HasSuffix(req.URL.Path, "/") {
+			http.NotFound(c.Response(), req)
 			return nil
 		}
-		server.ServeHTTP(c.Response(), c.Request())
+		name := strings.TrimPrefix(req.URL.Path, "/")
+		a, err := loadAsset(fsys, name, immutable)
+		if err != nil {
+			http.NotFound(c.Response(), req)
+			return nil
+		}
+		h := c.Response().Header()
+		h.Set("ETag", a.etag)
+		h.Set("Cache-Control", "no-cache")
+		// ServeContent 认响应头里已有的 ETag：If-None-Match 命中就回 304，
+		// Range 请求照旧支持（播放器拖动进度条靠它）。
+		http.ServeContent(c.Response(), req, path.Base(name), time.Time{}, bytes.NewReader(a.body))
 		return nil
 	})
 	return nil

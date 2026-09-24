@@ -19,14 +19,16 @@ type smbAddition struct {
 	Password       string `json:"password"`
 	ShareName      string `json:"share_name"`       // 共享名
 	RootFolderPath string `json:"root_folder_path"` // 共享内的根目录
+	MetaDir        string `json:"meta_dir"`         // 元数据目录（共享内，缺省 <根>/.mocca）
 }
 
 // SMB Samba 共享。连接来自复用池，Close 只归还引用不会断开。
 type SMB struct {
-	key    string
-	conn   *smbConn
-	Root   string
-	closed bool
+	key      string
+	conn     *smbConn
+	Root     string
+	metaRoot string // 元数据根：共享内的 .mocca 目录
+	closed   bool
 }
 
 // NewSMB 从连接池取一条到该共享的连接（没有才真正拨号 + 挂载）。
@@ -67,11 +69,22 @@ func NewSMB(s *models.Storage) (Driver, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &SMB{key: smbKey(s, a), conn: conn, Root: a.RootFolderPath}, nil
+	// 元数据根默认在共享内的 .mocca；meta_dir 始终视为相对共享根（去掉前导斜杠后拼）。
+	meta := a.MetaDir
+	if meta == "" {
+		meta = ".mocca"
+	}
+	metaRoot := filepath.Join(a.RootFolderPath, strings.TrimPrefix(meta, "/"))
+	return &SMB{key: smbKey(s, a), conn: conn, Root: a.RootFolderPath, metaRoot: metaRoot}, nil
 }
 
 func (d *SMB) full(rel string) string {
 	return filepath.Join(d.Root, relPath(rel))
+}
+
+// metaFull 元数据根下的绝对路径（共享内），meta_dir 即 .mocca 目录本身。
+func (d *SMB) metaFull(rel string) string {
+	return filepath.Join(d.metaRoot, relPath(rel))
 }
 
 func (d *SMB) List(rel string) ([]Entry, error) {
@@ -91,8 +104,9 @@ func (d *SMB) List(rel string) ([]Entry, error) {
 	return out, nil
 }
 
-func (d *SMB) Stat(rel string) (Entry, error) {
-	info, err := d.conn.share.Stat(d.full(rel))
+func (d *SMB) Stat(rel string) (Entry, error) { return d.statAt(d.full(rel)) }
+func (d *SMB) statAt(p string) (Entry, error) {
+	info, err := d.conn.share.Stat(p)
 	if err != nil {
 		return Entry{}, errors.WithStack(err)
 	}
@@ -104,8 +118,9 @@ func (d *SMB) Stat(rel string) (Entry, error) {
 	}, nil
 }
 
-func (d *SMB) Open(rel string) (io.ReadSeeker, int64, error) {
-	f, err := d.conn.share.Open(d.full(rel))
+func (d *SMB) Open(rel string) (io.ReadSeeker, int64, error) { return d.openAt(d.full(rel)) }
+func (d *SMB) openAt(p string) (io.ReadSeeker, int64, error) {
+	f, err := d.conn.share.Open(p)
 	if err != nil {
 		return nil, 0, errors.WithStack(err)
 	}
@@ -122,8 +137,8 @@ func (d *SMB) MkdirAll(rel string) error {
 }
 
 // Create 先把父目录逐级建好再创建文件（Samba 不会自动建父目录）。
-func (d *SMB) Create(rel string) (io.WriteCloser, error) {
-	p := d.full(rel)
+func (d *SMB) Create(rel string) (io.WriteCloser, error) { return d.createAt(d.full(rel)) }
+func (d *SMB) createAt(p string) (io.WriteCloser, error) {
 	if dir := filepath.Dir(p); dir != "" && dir != "." {
 		if err := d.conn.share.MkdirAll(dir, 0o755); err != nil {
 			return nil, errors.WithStack(err)
@@ -137,8 +152,8 @@ func (d *SMB) Create(rel string) (io.WriteCloser, error) {
 }
 
 // Remove 删除文件或目录：先 Stat 判断类型，目录需递归删。
-func (d *SMB) Remove(rel string) error {
-	p := d.full(rel)
+func (d *SMB) Remove(rel string) error { return d.removeAt(d.full(rel)) }
+func (d *SMB) removeAt(p string) error {
 	info, err := d.conn.share.Stat(p)
 	if err != nil {
 		return errors.WithStack(err)
@@ -176,13 +191,16 @@ func (d *SMB) Close() error {
 	return nil
 }
 
-// Meta* 系列：SMB 的元数据放共享内、与媒体同根，直接复用内容方法。
-func (d *SMB) MetaStat(rel string) (Entry, error) { return d.Stat(rel) }
+// Meta* 系列：元数据根（meta_dir / .mocca）与媒体根（Root）可能不同，
+// 故走独立的 metaFull 路径，而不是复用内容方法。
+func (d *SMB) MetaStat(rel string) (Entry, error) { return d.statAt(d.metaFull(rel)) }
 func (d *SMB) MetaOpen(rel string) (io.ReadSeeker, int64, error) {
-	return d.Open(rel)
+	return d.openAt(d.metaFull(rel))
 }
-func (d *SMB) MetaMkdirAll(rel string) error { return d.MkdirAll(rel) }
+func (d *SMB) MetaMkdirAll(rel string) error {
+	return errors.WithStack(d.conn.share.MkdirAll(d.metaFull(rel), 0o755))
+}
 func (d *SMB) MetaCreate(rel string) (io.WriteCloser, error) {
-	return d.Create(rel)
+	return d.createAt(d.metaFull(rel))
 }
-func (d *SMB) MetaRemove(rel string) error { return d.Remove(rel) }
+func (d *SMB) MetaRemove(rel string) error { return d.removeAt(d.metaFull(rel)) }

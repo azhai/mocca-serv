@@ -394,14 +394,27 @@
   background: var(--md-surface-variant); border: 1px solid var(--md-outline-variant);
 }
 .cover .cover-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.cover label.btn.ghost {
+/* 封面工具条里的控件（删除封面 / 上传封面 / 右侧的 FFmpeg 截图按钮）共用同一规格：
+   36px 高、同内边距、同边框与圆角，这样一行里的高度与基线才对得齐。
+   原先只给「上传封面」那个 label 写了样式，右边截图按钮走全局 button 规则
+   （边框色 pop 成 --md-outline、内边距 20px），一排里参差不齐。 */
+.cover .cover-tools .btn.ghost {
   display: inline-flex; align-items: center; justify-content: center;
+  /* margin: 0 必须有：这是个 <label>，会命中后台那条通用 `label { margin-bottom: 14px }`。
+     在 align-items: center 的 flex 行里，底边距会把 label 整体往上顶半个边距，
+     于是它比旁边的 <button> 高出一截 —— 一排里只有它错位。 */
+  margin: 0;
   height: 36px; padding: 0 16px; border-radius: 18px; cursor: pointer;
-  border: 1px solid var(--md-outline-variant); font-size: 13px; line-height: 1;
+  border: 1px solid var(--md-outline-variant);
+  background: transparent; color: var(--md-on-surface);
+  font-size: 13px; line-height: 1;
 }
-.cover label.btn.ghost:hover { background: var(--md-surface-container-high); }
+.cover .cover-tools .btn.ghost:hover:not([disabled]) { background: var(--md-surface-container-high); }
+.cover .cover-tools .btn.ghost[disabled] { opacity: .55; cursor: not-allowed; }
+/* .danger 要单独再写一条：上面的选择器权重更高，会盖掉全局 button.danger 的红字红边 */
+.cover .cover-tools .btn.ghost.danger { color: var(--md-error); border-color: var(--md-error); }
+.cover .cover-tools .btn.ghost.danger:hover:not([disabled]) { background: rgba(179, 38, 30, .08); }
 .cover input.file-in { display: none; }
-.cover button.btn.ghost.disabled { opacity: .55; cursor: not-allowed; font-size: 13px; }
 /* FFmpeg 截图：秒数输入 + 触发按钮，整组贴到行的最右 */
 .cover .shot { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
 .cover .shot input.shot-sec {
@@ -416,6 +429,70 @@
 button.ghost.danger { color: var(--md-error); border-color: var(--md-error); }
 button.ghost.danger:hover:not([disabled]) { background: rgba(179, 38, 30, .08); }
 .panel .fld textarea.slim { resize: vertical; }
+
+/* TMDB 刮削：检索词 + 触发按钮一行，下面是候选列表（点一条即写入该文件） */
+.scrape { margin-bottom: 12px; }
+.scrape .scrape-head { display: flex; align-items: center; gap: 8px; }
+.scrape input.scrape-key {
+  flex: 1; min-width: 0; height: 36px; padding: 0 10px; border-radius: 8px; font: inherit; font-size: 13px;
+  border: 1px solid var(--md-outline-variant);
+  background: var(--md-surface-container-lowest); color: var(--md-on-surface);
+  box-sizing: border-box;
+}
+.scrape button.btn.ghost {
+  flex: none; height: 36px; padding: 0 16px; border-radius: 18px; font: inherit; font-size: 13px;
+  border: 1px solid var(--md-outline-variant); background: transparent; color: var(--md-on-surface);
+  cursor: pointer;
+}
+.scrape button.btn.ghost:hover:not([disabled]) { background: var(--md-surface-container-high); }
+.scrape button.btn.ghost[disabled] { opacity: .55; cursor: not-allowed; }
+/* 同名电影的选择：**一行放下全部**（「原始数据」+ 三个候选），卡片上只放
+   **封面缩略图 + 主演**（同名时片名一样，这两样才是认出"是哪一部"的依据）；
+   其余信息走 hover tip（原生 title，见 candTip）。
+   第一列是「原始数据」，压到只剩一条竖排文字（36px），把宽度全省给候选。
+   行高固定 128px（是之前 384px 的 1/3），整块给固定高度 + 内部滚动。 */
+.scrape .cands {
+  display: grid; grid-template-columns: 36px repeat(3, minmax(0, 1fr));
+  grid-auto-rows: 128px; gap: 8px;
+  margin-top: 8px; max-height: 136px; overflow-y: auto; padding-right: 2px;
+}
+/* 「原始数据」卡片：窄条 + 虚线，竖排文字（横着写会挤成一团），点它还原到刮削前 */
+.scrape button.cand.raw {
+  border-style: dashed; background: transparent;
+  padding: 8px 2px; align-items: center; justify-content: center;
+}
+.scrape button.cand.raw .cand-c {
+  writing-mode: vertical-rl; text-orientation: upright;
+  display: block; overflow: visible; letter-spacing: 2px;
+  font-size: 12px; font-weight: 600; color: var(--md-on-surface-variant);
+}
+.scrape button.cand {
+  display: flex; flex-direction: column; gap: 6px; height: 100%;
+  padding: 6px; cursor: pointer;
+  border: 1px solid var(--md-outline-variant); border-radius: 8px; text-align: center;
+  background: var(--md-surface-container-low); color: var(--md-on-surface); font: inherit;
+}
+.scrape button.cand:hover:not([disabled]) { background: var(--md-surface-container-high); }
+.scrape button.cand[disabled] { opacity: .55; cursor: not-allowed; }
+/* 当前生效的那条：主色描边（inset 阴影让描边不撑开尺寸） */
+.scrape button.cand.on { border-color: var(--md-primary); box-shadow: inset 0 0 0 1px var(--md-primary); }
+/* 缩略图区占满卡片剩余高度（flex:1），图**铺满列宽**：
+   竖版海报按宽度铺满后一定比这个区高，多出来的部分由 cover **上下对称截掉**
+   （object-position 默认 center）。用 contain 会按高度缩、两侧留空，"宽度没铺满"。
+   cover 只裁不拉伸，海报不会变形。 */
+.scrape .cand-thumb {
+  display: flex; flex: 1; align-items: center; justify-content: center;
+  width: 100%; min-height: 0; overflow: hidden;
+}
+.scrape .cand-thumb img {
+  width: 100%; height: 100%; object-fit: cover;
+  border-radius: 4px; display: block;
+}
+.scrape .cand-thumb .ph { font-size: 11px; color: var(--md-on-surface-variant); }
+.scrape .cand-c {
+  font-size: 11px; color: var(--md-on-surface-variant); line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 
 /* 编辑弹窗面板：进入时微微上浮+淡入 */
 .overlay > .panel { animation: panelPop .22s ease; }

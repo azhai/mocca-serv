@@ -14,7 +14,7 @@
 - [3. 探活与初始化](#3-探活与初始化)
 - [4. 文件系统](#4-文件系统)
 - [5. 流媒体取流](#5-流媒体取流)
-- [6. 媒体元数据与封面](#6-媒体元数据与封面)
+- [6. 媒体附加信息与封面](#6-媒体附加信息与封面)
 - [7. 收藏、评论与弹幕](#7-收藏评论与弹幕)
 - [8. 目录密码](#8-目录密码)
 - [9. 存储与用户管理（管理员）](#9-存储与用户管理管理员)
@@ -288,6 +288,7 @@ curl -s http://127.0.0.1:8000/api/ping      # pong
     "name": "demo.mp4", "size": 734003200, "is_dir": false, "type": 2,
     "thumb": "", "sign": "", "modified": "2026-08-01T12:00:00+08:00",
     "raw_url": "/d/media/demo.mp4?token=eyJhbGciOi...",
+    "hls_url": "/d/media/.hls/demo.mp4/index.m3u8?token=eyJhbGciOi...",
     "header": "", "provider": "Local",
     "title": "演示片", "duration": 7325000,
     "cover": ".mocca/covers/demo.png", "description": "简介", "authors": ["甲", "乙"]
@@ -298,6 +299,7 @@ curl -s http://127.0.0.1:8000/api/ping      # pong
 | 字段 | 说明 |
 | --- | --- |
 | `raw_url` | 可直接交给播放器/下载器的地址。**带 `Authorization` 请求时**会把该令牌附到 `?token=`；不带则只有路径 |
+| `hls_url` | 旁路 HLS 清单地址，**仅当同目录 `.hls/<文件名>/index.m3u8` 存在时才有**。客户端应优先用它（弱网下按分片续拉），取不到再回落到 `raw_url` 的 Range 直链 |
 | `provider` | 当前只有 `Local` 与 `SMB`（由存储的 `driver` 决定） |
 | `header` | 恒为空字符串（APP 会解析该字段，故保留） |
 | `title` / `duration` / `cover` / `description` / `authors` | 有元数据时才出现（`omitempty`） |
@@ -328,6 +330,9 @@ curl -s http://127.0.0.1:8000/api/ping      # pong
 跨存储没有廉价实现（要整份复制再删），宁可直接拒绝，也不做「看起来成功其实是慢速拷贝」。
 
 三者都不经过目录密码校验，也不受 `base_path` 限制 —— 只有管理员能调，这一点由中间件保证。
+
+媒体条目编辑与封面/刮削类写操作（`/api/fs/edit`、`/api/fs/cov`、`/api/fs/shot`、
+`/api/fs/patch`、`/api/fs/scrape`、`/api/fs/scrape/apply`）见 [§6](#6-媒体附加信息与封面)。
 
 ### 4.5 上传（管理员）
 
@@ -396,75 +401,217 @@ Last-Modified: Fri, 01 Aug 2026 12:00:00 GMT
 
 ---
 
-## 6. 媒体元数据与封面
+## 6. 媒体附加信息与封面
 
-### GET /api/meta?path=/media/demo.mp4 （公开）
+### 6.1 数据放在哪：设备侧 `meta_dir`（默认 `<root>/.mocca`）
+
+附加信息（简介/导演/年份/地区/出品方/语言/主演/主唱/伴唱/演奏）**不入库**，
+只存在媒体所在存储的 **`meta_dir`** 目录里（即 `.mocca` 目录本身），按内容 sha1 寻址
+（sha1 前 2 位作一级目录、次 2 位作二级目录、其余作文件名）：
+
+- `meta_dir` 是存储的 `addition` 里可选项；**缺省为 `<root_folder_path>/.mocca`**
+  （如 Linux 下 `root_folder_path=/mnt/sda1` → `meta_dir=/mnt/sda1/.mocca`）。
+- 相对路径（相对 `meta_dir`）形如 `xx/xx/<sha1 其余部分>.meta` / `.png`。
+- 绝对路径或相对路径都行：相对路径视作相对 `root_folder_path`（SMB 则相对共享内根）；想放到设备根或别处就填绝对路径。
+
+| 文件（相对 `meta_dir`） | 内容 |
+| --- | --- |
+| `xx/xx/<sha1 其余部分>.meta` | 附加信息 JSON（见下） |
+| `xx/xx/<sha1 其余部分>.png` | 封面，统一 **400×300**（等比缩放后居中裁剪填满） |
+
+sha1 来自媒体文件内容，记在同目录的 `.index.jsonl`（`mocca index` 生成）；
+`.index.jsonl` 里该文件的 `is_new` 由「`.meta` 与 `.png` 是否都在」推导：
+**都在 → 0（附加信息已就绪），否则 1**。
+
+`.meta` 的字段（全部可空；视频用 director/cast，音频用 lead/backing/instrument）：
+
+```json
+{ "summary": "简介", "director": "导演", "year": 2014,
+  "region": "美国", "studio": "Legendary Pictures", "language": "英语",
+  "cast": ["主演甲", "主演乙"],
+  "lead": ["主唱"], "backing": ["伴唱"], "instrument": ["演奏"] }
+```
+
+### 6.2 POST /api/fs/info （公开，登录可选）
+
+悬浮层一次请求拿全：文件基础信息 + sha1 + 是否有封面 + 附加信息。
+
+```json
+{ "path": "/media/demo.mp4", "password": "<目录密码的静态哈希，可选>" }
+```
 
 ```json
 { "code": 200, "message": "success",
-  "data": { "meta": { "id": 1, "path": "/media/demo.mp4", "kind": 2, "size": 734003200,
-                      "title": "演示片", "duration": 7325000,
-                      "cover": ".mocca/covers/demo.png", "description": "简介",
-                      "created_at": "...", "updated_at": "..." },
-            "authors": ["甲", "乙"] } }
+  "data": { "name": "demo.mp4", "is_dir": false, "type": 2,
+            "modified": "2026-08-01T12:00:00+08:00", "size": 734003200,
+            "sha1": "a1b2c3…（40 位）", "poster": true, "summary": "简介",
+            "meta": { "summary": "简介", "director": "导演", "year": 2014,
+                      "region": "美国", "studio": "出品方", "language": "英语",
+                      "cast": ["主演甲"], "lead": [], "backing": [], "instrument": [] } } }
 ```
 
-没有元数据时返回 `code: 404`、`尚无元数据`。
+没有 `.index.jsonl` 记录（`sha1` 为空）或读不到 `.meta` 时，`meta` 为 `null`，
+`poster` 为 `false`；前端按「无附加信息」处理，不是错误。
 
-### POST /api/meta/save （管理员）
+### 6.3 GET /meta/poster?path=/media/demo.mp4 （令牌走查询串）
 
-有则更新、无则新建。
+输出该文件的 `.mocca` 封面 PNG。鉴权与取流同款（`StreamAuth`）：
+`<img src>` 带不了请求头，所以令牌放 `?token=`，受保护目录再带 `?password=`。
+文件不存在或没有封面时返回 **真实 HTTP 404**（响应体不是信封）——
+这个地址是给 `<img>` 用的，状态码才是有意义的信号。
+
+### 6.4 POST /api/fs/edit （管理员）
+
+改名 + 整体写入附加信息。改名只改**不含扩展名的部分**，扩展名原样保留；
+写附加信息时 `.index.jsonl` 没有 sha1 就现场整读算一次。
 
 ```json
-{ "path": "/media/demo.mp4", "kind": 2, "size": 734003200,
-  "title": "演示片", "duration": 7325000,
-  "cover": ".mocca/covers/demo.png", "description": "简介",
-  "authors": ["甲", "乙"] }
+{ "path": "/media/demo.mp4", "name": "新名字",
+  "summary": "简介", "director": "导演", "cast": ["主演甲", "主演乙"],
+  "year": 2014, "region": "美国", "studio": "出品方", "language": "英语",
+  "lead": [], "backing": [], "instrument": [] }
+```
+
+```json
+{ "code": 200, "message": "success", "data": { "path": "/media/新名字.mp4", "name": "新名字.mp4" } }
+```
+
+`name` 省略或与现名相同则不移动文件。文字/未知类型可以改名，但不写附加信息
+（只有视频 `2` 与音频 `3` 有附加信息）。图片不写。
+
+### 6.5 POST /api/fs/cov?path=/media/demo.mp4 （管理员）
+
+上传替换封面。请求体可直接是图片字节（`Content-Type` 任意），
+也兼容 `multipart/form-data` 的 `file` 字段；**≤ 5 MB**，且必须能解码为图片。
+落盘前统一转成 400×300 高压缩 PNG，覆盖旧的 `<sha1>.png`。
+
+### 6.6 POST /api/fs/shot （管理员，需本机有 ffmpeg）
+
+从视频按秒抽一帧作封面。`sec` 接受秒数（`1` / `1.5`）或「时:分:秒」（`1:30` / `1:02:30`），
+数字与字符串都行；只支持视频。
+
+```json
+{ "path": "/media/demo.mp4", "sec": "1:30" }
+```
+
+### 6.7 POST /api/fs/patch （管理员，需本机有 ffmpeg）
+
+目录级补充截图：遍历该目录的 `.index.jsonl`，给**仍缺封面**的视频在指定时间点抽帧生封面，
+已有封面的一律跳过。`sec` 同 `/fs/shot`。
+
+```json
+{ "code": 200, "message": "success",
+  "data": { "done": 8, "covered": 12, "failed": 0, "sec": "1:30" } }
 ```
 
 | 字段 | 说明 |
 | --- | --- |
-| `kind` | **必填**，只能是 `2`（视频）/ `3`（音频）/ `5`（图片）；其它值 `code: 400`、`媒体类型不合法` |
-| `size` / `duration` | 字节数 / 毫秒 |
-| `cover` | 相对**数据目录**的路径（`models.CoverRelPath` 口径：`.mocca/covers/<文件名>`） |
-| `authors` | 整体替换，顺序即展示顺序 |
+| `covered` | 该目录里可处理的视频数（有 sha1 的视频） |
+| `done` | 本次真正生成封面的数量 |
+| `failed` | 抽帧或写盘失败的数量（单个失败不中断整批） |
 
-图片（`kind=5`）落库前会**强制清空** `duration` / `cover` / `description`，避免脏数据。
+### 6.8 POST /api/fs/scrape （管理员，需配置 `TMDB_KEY`）
 
-### POST /api/meta/cover （管理员，仅完整版）
+按片名检索 TMDB 电影，出候选列表。**只查不写**，用户选中后再调 6.9 落盘。
 
-把管理后台用 canvas 画好的封面图落盘，返回可直接写进元数据的 `cover`。
-纯 API 构建（`-tags noweb`）返回 `code: 404` 与一句说明。
-
-`multipart/form-data`：
+```json
+{ "path": "/media/Interstellar.2014.1080p.BluRay.mp4",
+  "keyword": "星际穿越", "year": 2014 }
+```
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `file` | 是 | 图片内容，≤ 2 MB；只接受 PNG / JPEG / WebP（**按内容嗅探**，文件名与声明的 MIME 都不作数） |
-| `name` | 是 | 文件名片段，通常直接传媒体文件名（`a.mp4` → 落盘 `a.png`） |
+| `path` | 是 | 目标文件，**必须是视频**（音频/图片返回 `code: 400`、`TMDB 刮削只支持视频文件`） |
+| `keyword` | 否 | 留空则按文件名猜：剥掉 `[]()` 标记（含网址的整组丢掉）、去掉清晰度/编码/音轨类标记、取最后一个独立 4 位年份 |
+| `year` | 否 | 与 `keyword` 同时给出时用来收窄；带年份查不到会自动去掉年份重查一次 |
 
-```bash
-curl -s -X POST -H "Authorization: $TOKEN" \
-  -F "name=a.mp4" -F "file=@cover.png" \
-  http://127.0.0.1:8000/api/meta/cover
+```json
+{ "code": 200, "message": "success",
+  "data": { "file": "Interstellar.2014.1080p.BluRay.mp4",
+            "keyword": "Interstellar", "year": 2014, "total": 1,
+            "candidates": [ { "id": 157336, "title": "星际穿越", "original_title": "Interstellar",
+                              "year": 2014, "overview": "…", "poster": "https://image.tmdb.org/t/p/w500/abc.jpg",
+                              "vote_average": 8.4 } ] } }
+```
+
+未配置 `TMDB_KEY` 时返回 `code: 400`、`未配置 TMDB_KEY，无法刮削`。
+
+**超时不是密钥问题**：密钥错是**秒回**的 `TMDB 返回 401：Invalid API key`；报错里出现
+`调用 TMDB 失败（未走代理｜代理 http://…）: …` 就是卡在网络层 —— 括号里直接写明这次走没走代理，
+省得猜。另外 `TLS handshake timeout` 是 Transport 自己的 **10 秒**上限（`TLSHandshakeTimeout`），
+比 15 秒的客户端超时**先到**，含义是 TCP 通了但 TLS 没握完。`api.themoviedb.org` 与
+`image.tmdb.org` 在部分网络下无法直连，此时配 `TMDB_PROXY` 即可（见 6.9 的配置表）。
+
+错误信息里的密钥一律打码（`api_key=***`）：v3 密钥是以查询串形式挂在 URL 上的，
+`*url.Error` 会把整条 URL 带出来，不打码就等于把密钥印到界面和日志里。
+
+### 6.9 POST /api/fs/scrape/apply （管理员）
+
+把选中的那条 TMDB 结果写进该文件的 `.meta` 与封面 `.png`。
+
+```json
+{ "path": "/media/Interstellar.2014.1080p.BluRay.mp4", "tmdb_id": 157336 }
 ```
 
 ```json
-{ "code": 200, "message": "success", "data": { "cover": ".mocca/covers/a.png" } }
+{ "code": 200, "message": "success",
+  "data": { "file": "Interstellar.2014.1080p.BluRay.mp4", "sha1": "a1b2c3…", "tmdb_id": 157336,
+            "title": "星际穿越", "year": 2014, "director": "克里斯托弗·诺兰",
+            "cast": ["马修·麦康纳", "安妮·海瑟薇"],
+            "region": "美国", "studio": "Legendary Pictures", "language": "英语",
+            "poster": true, "poster_error": "" } }
 ```
 
-文件落在 `<数据目录>/.mocca/covers/`（与媒体库解耦，数据目录搬家也不丢）。
-除了路径穿越（`../`、`\`）会被收敛成基名，非法字符也会换成 `-`，主文件名最长 64 个字符。
+行为约定：
 
-拿到路径后仍需写进元数据才会生效：
+- **只覆盖 TMDB 有值的字段**：人工填过的导演/主演/简介不会因为 TMDB 缺该字段而被清空
+  （刮削是补齐，不是重置）；
+- 海报下载后走与 6.5/6.6 完全相同的裁剪编码，覆盖旧封面；**海报失败不影响文字信息**落盘，
+  失败原因在 `poster_error` 里（`poster: false`）；
+- 写完后服务端会重扫该文件所在目录，`.index.jsonl` 的 `is_new` 立刻翻成 `0`；
+- 想改名到 TMDB 的规范片名，用 6.4 `/api/fs/edit`（本接口不改文件名）。
 
-```bash
-curl -s -X POST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"path":"/media/a.mp4","kind":2,"cover":".mocca/covers/a.png"}' \
-  http://127.0.0.1:8000/api/meta/save
+配置项（`.env`，也支持 `MOCCA_` 前缀的系统环境变量）：
+
+| 键 | 说明 |
+| --- | --- |
+| `TMDB_KEY` | TMDB 的 v3 `api_key` 或 v4 读令牌（JWT）都填这里，按形态自动选鉴权方式；留空则刮削接口不可用 |
+| `TMDB_LANG` | 检索与详情的语言，缺省 `zh-CN`（中文简介与译名） |
+| `TMDB_PROXY` | 刮削出网代理（如 `http://127.0.0.1:7890`），检索与海报下载都走它；留空则直连（沿用进程环境的 `HTTPS_PROXY`）。地址非法时刮削接口回一句「刮削代理地址无效」 |
+
+### 6.10 POST /api/fs/hls （管理员，需本机有 ffmpeg）
+
+把一个视频切成**旁路 HLS**（清单 + 分片），产物写进同目录的隐藏目录：
+
+```text
+<目录>/.hls/<视频文件名>/index.m3u8     ← 清单
+<目录>/.hls/<视频文件名>/seg00000.ts    ← 分片
 ```
 
----
+只切不转（`ffmpeg -c copy`）：画质与原文件一致、CPU 很低，代价是只有单码率档。
+点开头的隐藏目录不出现在列目录结果里、也不被索引，但 `/d` 取流照常可用。
+
+切完后再调 `/fs/get`，该视频就会多出一个 `hls_url`（见 §4.2），客户端据此**优先走 HLS**；
+没有清单的仍走 `raw_url` 的 Range 直链。
+
+```json
+{ "path": "/media/demo.mp4", "force": false }
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `path` | 是 | 目标文件，**必须是视频**（目录 / 音频 / 图片返回 `code: 400`） |
+| `force` | 否 | 默认 `false`：已有清单则跳过（回 `skipped: true`）；`true` 则重切 |
+
+```json
+{ "code": 200, "message": "success",
+  "data": { "path": "/media/demo.mp4",
+            "playlist": "/media/.hls/demo.mp4/index.m3u8",
+            "skipped": false } }
+```
+
+一次只处理一个文件：管理后台的「视频切分」页对多选**逐个发请求**（并发 2），各自报状态，
+某个失败不牵连其余。命令行等价物是 `tools/gen_hls.sh`（同一约定、同一套 ffmpeg 参数）。
 
 ## 7. 收藏、评论与弹幕
 
@@ -528,7 +675,7 @@ curl -s -X POST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 
 ---
 
-## 9. 存储与用户管理（管理员）
+## 9. 存储、用户与全局选项（管理员）
 
 ### 存储
 
@@ -538,6 +685,34 @@ curl -s -X POST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | `/api/storage/create` | POST | `mount_path`, `order`, `driver`, `addition`, `disabled` |
 | `/api/storage/update` | POST | `id` + 待改字段（字段为空表示不改） |
 | `/api/storage/delete` | POST | `id` |
+| `/api/storage/scan` | GET | — （自动发现外接设备根目录，见下） |
+
+#### 自动发现外接设备根目录 `GET /api/storage/scan`
+
+挂存储时不必手工猜路径：这个接口按操作系统扫出本机的外接硬盘挂载点，直接填进 `addition` 的
+`root_folder_path` 即可。
+
+- **Linux**：解析 `/proc/self/mounts`，只保留块设备（`/dev/*`）、排除 `/proc /sys /dev /run /boot /efi`
+  等系统挂载点；外接判定走 `/sys/class/block/<dev>/removable`，读不到则兜底「不是根盘即疑似外接」。
+- **macOS**：解析 `mount` 输出，只保留 `/Volumes/*` 下的盘。
+- **其它系统（如 Windows）**：返回空数组，由管理员手动填写。
+
+返回 `data` 是候选数组，每项：
+
+```json
+[{ "path": "/media/MyUSB", "source": "/dev/sdb1", "fstype": "exfat",
+   "removable": true, "label": "MyUSB" }]
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `path` | 候选根目录，直接写进 `root_folder_path` |
+| `source` | 设备节点，如 `/dev/sdb1` |
+| `fstype` | 文件系统，如 `exfat` / `apfs` |
+| `removable` | `true` = 疑似外接（U 盘/移动盘），`false` = 内置盘 |
+| `label` | 友好名（挂载点末段），界面展示用 |
+
+找不到任何候选时返回空数组（`[]`），不是错误——前端据此退回手工填写。
 
 `mount_path` 在**保存时**就被规范化：开头补斜线、末尾去斜线、合并重复斜线（`media/`、`media`、`/media//`
 一律存成 `/media`）。返回体与后续列表里拿到的都是规范形态，客户端不需要自己纠。改动挂载点会立即
@@ -548,23 +723,26 @@ curl -s -X POST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 ```json
 // 本地目录
 { "mount_path": "/media", "driver": "local",
-  "addition": "{\"root_folder_path\":\"/mnt/media\"}" }
+  "addition": "{\"root_folder_path\":\"/mnt/media\",\"meta_dir\":\"/mnt/media/.mocca\"}" }
 
 // Samba / SMB
 { "mount_path": "/nas", "driver": "smb",
-  "addition": "{\"address\":\"192.168.1.9\",\"username\":\"u\",\"password\":\"p\",\"share_name\":\"media\",\"root_folder_path\":\"movies\"}" }
+  "addition": "{\"address\":\"192.168.1.9\",\"username\":\"u\",\"password\":\"p\",\"share_name\":\"media\",\"root_folder_path\":\"movies\",\"meta_dir\":\".mocca\"}" }
 ```
 
 | 驱动 | `driver` 取值 | `addition` 字段 |
 | --- | --- | --- |
-| 本地目录 | `local`（空值也按 local） | `root_folder_path`（空则 `.`） |
-| SMB | `smb` / `samba` | `address`（`host` 或 `host:445`，缺端口补 445）、`username`、`password`、`share_name`（必填）、`root_folder_path`（共享内根目录） |
+| 本地目录 | `local`（空值也按 local） | `root_folder_path`（空则 `.`）、`meta_dir`（可选，缺省 `<root_folder_path>/.mocca`，绝对或相对 `root_folder_path`） |
+| SMB | `smb` / `samba` | `address`（`host` 或 `host:445`，缺端口补 445）、`username`、`password`、`share_name`（必填）、`root_folder_path`（共享内根目录）、`meta_dir`（可选，缺省 `<root_folder_path>/.mocca`，相对共享内根） |
+
+> `meta_dir` 即元数据根（封面/简介/.index 的 `.mocca` 目录本身）。后台「新增/编辑挂载点」会自动带出默认值
+> （`root_folder_path/.mocca`），也可手动改成设备根或别处。详见 §6.1。
 
 存储对象（列表项）：
 
 ```json
 { "id": 1, "mount_path": "/media", "order": 0, "driver": "local", "status": "",
-  "addition": "{\"root_folder_path\":\"/mnt/media\"}", "cache_expiration": 0,
+  "addition": "{\"root_folder_path\":\"/mnt/media\",\"meta_dir\":\"/mnt/media/.mocca\"}", "cache_expiration": 0,
   "custom_cache_policies": "", "disabled": false, "modified": "..." }
 ```
 
@@ -598,6 +776,35 @@ curl -s -X POST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 
 > `permission` 是上游遗留的位掩码字段，**当前实现不参与任何判定**。
 
+### 全局选项
+
+后台「全局选项」页的开关，改完**即时生效**，不需要重启服务。
+
+| 端点 | 方法 | 参数 |
+| --- | --- | --- |
+| `/api/setting/list` | GET | — 返回全部开关（`key` / `label` / `hint` / 当前 `value`） |
+| `/api/setting/update` | POST | `{ "key": "fs_watch", "value": true }` |
+
+```json
+{ "code": 200, "message": "success",
+  "data": [ { "key": "fs_watch", "label": "文件监控（FS Watch）", "hint": "…", "value": false },
+            { "key": "allow_guest", "label": "允许游客浏览", "hint": "…", "value": true },
+            { "key": "allow_register", "label": "开放注册", "hint": "…", "value": true } ] }
+```
+
+| `key` | 缺省 | 说明 |
+| --- | --- | --- |
+| `fs_watch` | `false` | **媒体文件监控**：本地存储有文件增删改时，增量重扫所在目录的 `.index.jsonl`。开关一改就立即拉起/停掉监控，无需重启。**仅对本地（`local`）存储有效**——SMB 等远程存储拿不到本机文件事件 |
+| `allow_guest` | `true` | 未登录能否浏览（列目录 / 取流 / 看图） |
+| `allow_register` | 由 `ALLOW_REGISTER` 决定 | 是否开放自助注册 |
+
+`key` 只认上表（白名单），其它键一律 `code: 400`、`未知的选项：xxx`——
+`settings` 表本身是通用键值表，不设白名单就等于给后台开了个任意写入的口子。
+
+> `fs_watch` 为什么缺省关闭：fsnotify 没有递归 Add，inotify/kqueue 要为**每个子目录**
+> 单独登记，大目录树启动开销明显。关闭时仍有两处补索引的通道：**服务启动会先全量索引一次**
+> 每个存储（见 `main.go`），以及手动执行 `mocca index [挂载点]`。
+
 ---
 
 ## 10. 错误码
@@ -605,11 +812,11 @@ curl -s -X POST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | `code` | 含义 | 典型场景 |
 | --- | --- | --- |
 | 200 | 成功 | — |
-| 400 | 参数/状态错误 | 缺 `path`、口令不是静态哈希、`kind` 不合法、母目录已存在、跨存储移动、非图片封面、封面超 2 MB |
+| 400 | 参数/状态错误 | 缺 `path`、口令不是静态哈希、`kind` 不合法、母目录已存在、跨存储移动、非图片封面、封面超 2 MB、全局选项的未知 `key` |
 | 401 | 未认证 | 未带令牌、令牌过期/无效、游客被禁用、`base_path` 越界 |
 | 403 | 无权限 | 普通用户调管理员接口、目录密码不对、原密码不正确、注册已关闭 |
 | 404 | 目标不存在 | 文件/目录不存在、尚无元数据、挂载点不存在、纯 API 构建下的封面图接口 |
-| 500 | 服务端错误 | 读写存储失败、建号失败、签发令牌失败 |
+| 500 | 服务端错误 | 读写存储失败、建号失败、签发令牌失败；handler 里发生 panic 也走这里（调用栈记在 `<DATA_DIR>/error.log`，见 BACKEND.md §7.4） |
 
 中间件的失败一律走信封（HTTP 仍 200）：
 
@@ -618,6 +825,7 @@ curl -s -X POST -H "Authorization: $TOKEN" -H 'Content-Type: application/json' \
 | `AuthMiddleware` | 没带令牌 / 解析失败 | 401（`未登录` / `登录已失效`） |
 | `AdminMiddleware` | 同上，或角色不是管理员 | 401 / 403（`需要管理员权限`） |
 | `OptionalAuth` | 令牌无效不报错，按游客放行 | — |
+| `RecoverLog` | handler 或后续中间件 panic | 500（`服务内部错误`；`/d/*` 回真实 HTTP 500），调用栈写进 `<DATA_DIR>/error.log` |
 
 ---
 

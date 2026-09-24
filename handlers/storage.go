@@ -7,7 +7,8 @@ import (
 )
 
 // StorageReq 挂载点请求。Addition 是驱动私有配置的 JSON 文本，
-// 本地存储形如 {"root_folder_path":"/mnt/media"}。
+// 本地存储形如 {"root_folder_path":"/mnt/media","meta_dir":"/mnt/media/.mocca"}，
+// meta_dir 为可选项，缺省由驱动推算（内容根下的 .mocca）。
 type StorageReq struct {
 	ID        uint   `json:"id"`
 	MountPath string `json:"mount_path"`

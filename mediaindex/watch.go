@@ -5,13 +5,80 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/azhai/mocca/drivers"
+	"github.com/azhai/mocca/helpers"
 	"github.com/azhai/mocca/models"
 )
+
+// Watch 全局文件监控控制器。默认不启动（开关在库里，缺省关），
+// 后台「全局选项」改 `fs_watch` 时调 Start/Stop 即时生效，无需重启进程。
+var Watch = &WatchController{}
+
+// WatchController 让阻塞式 WatchStorages 变成可反复启停的能力。
+// 用包级单例而不是把句柄从 main 传进 handler：两者分属不同包，
+// 传参会把 main 的启动顺序耦合进 handler 的签名。
+type WatchController struct {
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	running bool
+	gen     uint64 // 每次 Start 自增；goroutine 退出时只有自己那一代还匹配才复位状态
+}
+
+// Start 拉起监控；已在跑则原样返回（幂等）。
+func (wc *WatchController) Start(logf func(string, ...any)) error {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	if wc.running {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	wc.cancel = cancel
+	wc.running = true
+	wc.gen++
+	gen := wc.gen
+	helpers.GoSafe("文件监控", func() {
+		defer func() {
+			// 只复位自己那一代：Stop 后紧接着 Start 时，旧 goroutine 的退出
+			// 不能把新一次监控的 running/cancel 清掉（否则状态与实际相反）。
+			wc.mu.Lock()
+			if wc.gen == gen {
+				wc.running = false
+				wc.cancel = nil
+			}
+			wc.mu.Unlock()
+		}()
+		if err := WatchStorages(ctx, logf); err != nil {
+			logf("文件监控退出: %v", err)
+		}
+	})
+	return nil
+}
+
+// Stop 停掉监控；没在跑时是空操作（幂等）。只发取消信号不等待，
+// WatchStorages 收到 ctx.Done 后自己归还驱动连接。
+// 状态先置为「未运行」：调用方（后台开关）拿到响应时，语义上监控已停。
+func (wc *WatchController) Stop() {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	if wc.cancel != nil {
+		wc.cancel()
+	}
+	wc.cancel = nil
+	wc.running = false
+	wc.gen++ // 作废在途 goroutine 的复位权
+}
+
+// Running 当前是否在监控。
+func (wc *WatchController) Running() bool {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	return wc.running
+}
 
 // WatchStorages 监控所有「本地(Local)」存储的媒体文件变化：变化落盘后增量重扫
 // 所在目录的 `.index.jsonl`。阻塞直到 ctx 取消。

@@ -71,8 +71,11 @@ func coverCrop(src image.Image, w, h int) image.Image {
 }
 
 // ImageCaptureTime 从图片 EXIF 取拍摄时间（DateTimeOriginal/DateTime），无则空串。
-func ImageCaptureTime(data []byte) string {
-	x, err := exif.Decode(bytes.NewReader(data))
+//
+// 收 io.Reader 而不是 []byte：EXIF 就在文件开头，驱动给的流直接喂进来就行，
+// 不必先把整张图读进内存。
+func ImageCaptureTime(r io.Reader) string {
+	x, err := exif.Decode(r)
 	if err != nil {
 		return ""
 	}
@@ -83,10 +86,17 @@ func ImageCaptureTime(data []byte) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// readAudioMeta 解析音频内嵌标签，返回专辑名、作者、内嵌封面图。
-// dhowden/tag 的 ReadFrom 需要 ReadSeeker（读文件头尾找标签帧），调用方需给全文。
-func readAudioMeta(data []byte) (album, artist string, pic []byte, picMime string) {
-	md, err := tag.ReadFrom(bytes.NewReader(data))
+// readAudioMeta 解析内嵌标签，返回专辑名、作者、内嵌封面图。
+//
+// 收 io.ReadSeeker 而不是 []byte：tag 库只在文件里**定位若干处**读 —— MP4 靠 Seek 跳过
+// mdat 载荷、ID3v1 在末尾 128 字节、ID3v2/FLAC 在头部。本地文件与 SMB 的 Seek 都是真偏移
+// （a protocol-level offset），代价与文件大小无关。
+//
+// 从前调用方是 `io.ReadAll` 整个文件再包成 bytes.Reader（注释还写着"调用方需给全文"）——
+// 于是一个 20GB 的视频也会被整个读进内存，只为拿几百字节的标签：既慢又可能 OOM，
+// 而拿到的 album/artist 目前没有任何代码或界面在读。
+func readAudioMeta(r io.ReadSeeker) (album, artist string, pic []byte, picMime string) {
+	md, err := tag.ReadFrom(r)
 	if err != nil {
 		return "", "", nil, ""
 	}
@@ -128,7 +138,7 @@ func FFmpegShot(drv drivers.Driver, rel, sec string) ([]byte, error) {
 		if buf, rerr := io.ReadAll(src); rerr == nil {
 			all = buf
 		}
-		_ = src.(interface{ Close() error }).Close()
+		closeStream(src)
 		stdin = bytes.NewReader(all)
 	}
 	args = append(args, "-i", inputArg,

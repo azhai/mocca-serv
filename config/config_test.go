@@ -11,7 +11,9 @@ import (
 func noEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{EnvFileKey, "ADMIN_PASSWORD", "ADDR", "DATA_DIR", "JWT_SECRET", "CFG_PREFIX",
-		EnvKeyPrefix + "ADMIN_PASSWORD", EnvKeyPrefix + "ADDR", EnvKeyPrefix + "DATA_DIR", EnvKeyPrefix + "JWT_SECRET"} {
+		"TMDB_KEY", "TMDB_LANG", "TMDB_PROXY",
+		EnvKeyPrefix + "ADMIN_PASSWORD", EnvKeyPrefix + "ADDR", EnvKeyPrefix + "DATA_DIR", EnvKeyPrefix + "JWT_SECRET",
+		EnvKeyPrefix + "TMDB_KEY", EnvKeyPrefix + "TMDB_LANG", EnvKeyPrefix + "TMDB_PROXY"} {
 		t.Setenv(k, "")
 	}
 }
@@ -208,5 +210,40 @@ func TestLoadUnreadableEnvFile(t *testing.T) {
 	t.Setenv(EnvFileKey, dir) // 指向目录
 	if _, err := Load(); err == nil {
 		t.Error("配置文件是目录时应报错")
+	}
+}
+
+// TestLoadTmdbProxy 刮削代理：.env 短名与带前缀的环境变量都要认。
+// 这是给「TMDB 直连超时」的部署留的出口 —— 配不上就等于刮削一直不可用。
+func TestLoadTmdbProxy(t *testing.T) {
+	// 不配时为空：即沿用 http.DefaultTransport（它会读进程环境的 HTTPS_PROXY）
+	inTempDir(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TmdbProxy != "" {
+		t.Errorf("未配置时应为空，got %q", cfg.TmdbProxy)
+	}
+
+	dir := inTempDir(t)
+	writeEnv(t, dir, "TMDB_PROXY=http://127.0.0.1:7890\n")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TmdbProxy != "http://127.0.0.1:7890" {
+		t.Errorf("TMDB_PROXY 未生效，got %q", cfg.TmdbProxy)
+	}
+
+	// 系统环境变量（带前缀）同样生效
+	inTempDir(t)
+	t.Setenv("MOCCA_TMDB_PROXY", "http://127.0.0.1:1081")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TmdbProxy != "http://127.0.0.1:1081" {
+		t.Errorf("MOCCA_TMDB_PROXY 未生效，got %q", cfg.TmdbProxy)
 	}
 }

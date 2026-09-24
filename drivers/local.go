@@ -11,8 +11,8 @@ import (
 	"github.com/pkg/errors"
 )
 
-// Local 本地目录。Root 是内容根（媒体），MetaRoot 是元数据根（.mocca）：
-// 通常是内容根的上级（设备根），让封面/简介随物理设备走。
+// Local 本地目录。Root 是内容根（媒体），MetaRoot 是元数据根（meta_dir）：
+// 即 .mocca 目录本身，默认落在内容根下的 .mocca，让封面/简介随物理设备走。
 type Local struct {
 	Root     string
 	MetaRoot string
@@ -22,6 +22,7 @@ type Local struct {
 func NewLocal(s *models.Storage) (Driver, error) {
 	var a struct {
 		RootFolderPath string `json:"root_folder_path"`
+		MetaDir        string `json:"meta_dir"`
 	}
 	if err := json.Unmarshal([]byte(s.Addition), &a); err != nil {
 		return nil, errors.Wrap(err, "解析本地存储配置失败")
@@ -34,7 +35,19 @@ func NewLocal(s *models.Storage) (Driver, error) {
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	return &Local{Root: abs, MetaRoot: filepath.Dir(abs)}, nil
+	// meta_dir = 元数据目录（.mocca 目录本身）。缺省用内容根下的 .mocca；
+	// 相对路径视作相对内容根，绝对路径原样使用（可在设备根甚至别处）。
+	storeDir := a.MetaDir
+	switch {
+	case storeDir == "":
+		storeDir = filepath.Join(abs, ".mocca")
+	case !filepath.IsAbs(storeDir):
+		storeDir = filepath.Join(abs, storeDir)
+	}
+	if storeDir, err = filepath.Abs(storeDir); err != nil {
+		return nil, errors.WithStack(err)
+	}
+	return &Local{Root: abs, MetaRoot: storeDir}, nil
 }
 
 func (d *Local) List(rel string) ([]Entry, error) {

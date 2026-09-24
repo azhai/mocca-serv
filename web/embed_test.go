@@ -132,6 +132,7 @@ func TestStaticAssetsServed(t *testing.T) {
 	for _, p := range []string{
 		"/css/styles.css", "/css/home.css",
 		"/js/app.js", "/js/home.js", "/js/mithril.js", "/js/static-hash.js",
+		"/js/hls.min.js", // HLS 播放依赖：本地内嵌，不走 CDN
 		"/logo.png", "/logo-64.png",
 	} {
 		req := httptest.NewRequest(http.MethodGet, p, nil)
@@ -274,6 +275,7 @@ func TestFSStripsPrefix(t *testing.T) {
 		homePage, adminPage,
 		"css/styles.css", "css/home.css",
 		"js/app.js", "js/home.js", "js/mithril.js", "js/static-hash.js",
+		"js/hls.min.js", // 旁路 HLS 播放依赖，同样随二进制分发
 		"logo.png", "logo-64.png",
 	} {
 		if _, err := fs.Stat(fsys, name); err != nil {
@@ -288,6 +290,72 @@ func TestFSStripsPrefix(t *testing.T) {
 		if _, err := fs.Stat(fsys, name); err == nil {
 			t.Errorf("旧的 %s 仍在 public 根，应已移到 css/ 或 js/", name)
 		}
+	}
+}
+
+// TestAssetsRevalidate 静态资源必须带 ETag + Cache-Control: no-cache。
+//
+// 这条守着一个极难查的问题：//go:embed 的文件 ModTime 是**零值**，
+// http.ServeContent 因此既不发 Last-Modified 也不发 ETag。响应没有任何验证器、
+// 也没有新鲜度信息，浏览器只能按启发式规则把 66KB 的 home.js 缓存住，而且
+// **没有东西可以回问** —— 于是重新编译、重启服务都不影响浏览器里那份旧 JS，
+// 表现就是「前端改了，页面毫无变化」，且反复排查源码也找不出问题。
+// 补上按内容算的 ETag 后，改了就立刻生效，没变则回 304。
+func TestAssetsRevalidate(t *testing.T) {
+	e := echo.New()
+	if err := web.Register(e, "/admin"); err != nil {
+		t.Fatalf("挂载页面失败: %v", err)
+	}
+	get := func(p string, hdr map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, p, nil)
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 两个页面：引用的是 /js/*、/css/* 这种固定地址，页面被缓存住就会一直指向旧脚本。
+	for _, p := range []string{"/", "/admin/"} {
+		if cc := get(p, nil).Header().Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
+			t.Errorf("%s 的 Cache-Control = %q, want 含 no-cache", p, cc)
+		}
+	}
+
+	rec := get("/js/home.js", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/js/home.js 状态码 = %d, want 200", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
+		t.Errorf("/js/home.js 的 Cache-Control = %q, want 含 no-cache", cc)
+	}
+	etag := rec.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("/js/home.js 没有 ETag：浏览器没有回问依据，会一直用缓存的旧脚本")
+	}
+
+	// 同一个 ETag 再请求必须 304：省掉重传，同时证明"能回问"这条路是通的。
+	rec2 := get("/js/home.js", map[string]string{"If-None-Match": etag})
+	if rec2.Code != http.StatusNotModified {
+		t.Errorf("If-None-Match 命中应回 304，got %d", rec2.Code)
+	}
+	if rec2.Body.Len() != 0 {
+		t.Errorf("304 不应带响应体，got %d 字节", rec2.Body.Len())
+	}
+
+	// Range 不能被这次改动弄丢：播放器拖动进度条、断点续传都靠它。
+	rec3 := get("/js/home.js", map[string]string{"Range": "bytes=0-9"})
+	if rec3.Code != http.StatusPartialContent {
+		t.Errorf("Range 请求应回 206，got %d", rec3.Code)
+	}
+	if rec3.Body.Len() != 10 {
+		t.Errorf("Range 0-9 应回 10 字节，got %d", rec3.Body.Len())
+	}
+
+	// ETag 必须跟着内容走：不同文件不能算出同一个指纹，否则内容变了浏览器也拿旧的。
+	if other := get("/css/home.css", nil).Header().Get("ETag"); other == etag {
+		t.Errorf("不同内容算出了相同 ETag: %s", etag)
 	}
 }
 

@@ -16,9 +16,13 @@ const state = {
   toast: '', toastErr: false,
   login: { user: '', pwd: '' },
   storages: [], storageForm: null,
+  scanList: null, scanning: false,
   users: [], userForm: null,
+  settings: [],
   folder: { path: '/media/', pwd: '' },
   upload: { dir: '/', files: [], busy: false },
+  // 视频切分（旁路 HLS）：sel 以文件路径为键，便于多选
+  hls: { path: '/media/', files: [], sel: {}, busy: false, listed: false },
 };
 
 function say(msg, isErr = false) { state.toast = msg; state.toastErr = isErr; m.redraw(); }
@@ -97,8 +101,8 @@ async function loadStorages() { state.storages = await api('/storage/list') || [
 function additionOf(driver, f) {
   return driver === 'smb'
     ? { address: f.address, username: f.username, password: f.password,
-        share_name: f.share_name, root_folder_path: f.root_folder_path }
-    : { root_folder_path: f.root_folder_path };
+        share_name: f.share_name, root_folder_path: f.root_folder_path, meta_dir: f.meta_dir }
+    : { root_folder_path: f.root_folder_path, meta_dir: f.meta_dir };
 }
 
 const Storages = {
@@ -143,8 +147,34 @@ const Storages = {
                 m('input[type=text]', { value: f.username, oninput: e => f.username = e.target.value })]) : null,
               f.driver === 'smb' ? m('label', [m('span', '密码'),
                 m('input[type=password]', { value: f.password, oninput: e => f.password = e.target.value })]) : null,
-              m('label', [m('span', f.driver === 'smb' ? '共享内根目录' : '本地根目录'),
-                m('input[type=text]', { value: f.root_folder_path, oninput: e => f.root_folder_path = e.target.value })]),
+              // .full：根目录要独占一行（后面可能还跟着「扫描外接设备」与候选列表，
+              // 与附加信息目录挤在同一行会把两者搅在一起）
+              m('label.full', [m('span', f.driver === 'smb' ? '共享内根目录' : '本地根目录'),
+                m('input[type=text]', { value: f.root_folder_path, oninput: e => {
+                    f.root_folder_path = e.target.value;
+                    if (!f.meta_dir) f.meta_dir = e.target.value + '/.mocca';
+                  } }),
+                f.driver === 'local'
+                  ? m('.scan-row', [
+                      m('button.ghost.sm', { onclick: scanDevices }, state.scanning ? '扫描中…' : '扫描外接设备'),
+                      m('span.form-hint', '自动列出外接硬盘，找不到再手填'),
+                    ])
+                  : null,
+                state.scanList && state.scanList.length
+                  ? m('.scan-list', state.scanList.map(c => m('button.chip', {
+                      onclick: () => { f.root_folder_path = c.path; f.meta_dir = c.path + '/.mocca'; state.scanList = null; },
+                    }, [
+                      m('b', c.label),
+                      m('span.muted', c.removable ? ' · 外接' : ' · 内置'),
+                      m('br'),
+                      m('span.path', c.path),
+                    ])))
+                  : null,
+              ]),
+              m('label.meta-dir-row', [m('span', '附加信息目录（meta_dir）'),
+                m('input[type=text]', { value: f.meta_dir, oninput: e => f.meta_dir = e.target.value }),
+                m('span.form-hint', '封面/简介存放处，默认「根目录/.mocca」，可改到设备根或别处'),
+              ]),
             ]),
             m('.form-actions', [
               m('button', {
@@ -168,7 +198,22 @@ const Storages = {
 
 function newStorage() {
   state.storageForm = { id: 0, mount_path: '', driver: 'local', address: '', share_name: '',
-    username: '', password: '', root_folder_path: '' };
+    username: '', password: '', root_folder_path: '', meta_dir: '' };
+}
+
+// 扫描本机外接设备根目录：交给后端跑（Linux 读 /proc/mounts、macOS 读 mount），
+// 这里只负责把候选列出来，点一条就填进 root_folder_path。找不到就退回手填。
+async function scanDevices() {
+  state.scanning = true; state.scanList = null;
+  try {
+    const list = await api('/storage/scan') || [];
+    state.scanList = list;
+    if (!list.length) say('未扫描到外接设备，请手填目录');
+  } catch (e) {
+    say('扫描失败，请手填目录', true);
+  } finally {
+    state.scanning = false;
+  }
 }
 function editStorage(s) {
   let a = {};
@@ -177,7 +222,7 @@ function editStorage(s) {
     id: s.id, mount_path: s.mount_path, driver: (s.driver || 'local').toLowerCase(),
     address: a.address || '', share_name: a.share_name || '',
     username: a.username || '', password: a.password || '',
-    root_folder_path: a.root_folder_path || '',
+    root_folder_path: a.root_folder_path || '', meta_dir: a.meta_dir || '',
   };
 }
 
@@ -283,6 +328,41 @@ function editUser(u) {
   state.userForm = { id: u.id, username: u.username, password: '', role: u.role,
     base_path: u.base_path || '', avatar: u.avatar || '01' };
 }
+
+/* ── 全局选项 ───────────────────────────────────────── */
+// 选项清单由服务端下发（含 label/hint/当前值），前端不硬编码键名：
+// 后端加一个开关，这里自动多一行，不用改前端。
+async function loadSettings() { state.settings = await api('/setting/list') || []; }
+
+function toggleSetting(opt, on) {
+  return guard(async () => {
+    const d = await api('/setting/update', { method: 'POST', body: { key: opt.key, value: on } });
+    opt.value = d.value; // 以服务端返回为准，失败时不会让界面停在错误状态
+    say(`已${d.value ? '开启' : '关闭'}「${d.label}」`);
+  });
+}
+
+const Settings = {
+  oninit: () => guard(loadSettings),
+  view() {
+    return m('.panel', [
+      m('h2', '全局选项'),
+      m('p.muted', '改动即时生效，无需重启服务。'),
+      state.settings.length === 0
+        ? m('p.muted', '正在读取…')
+        : state.settings.map(o => m('label.opt', [
+            m('.opt-text', [
+              m('span.opt-name', o.label),
+              m('span.opt-hint', o.hint),
+            ]),
+            m('input[type=checkbox]', {
+              checked: o.value,
+              onchange: e => toggleSetting(o, e.target.checked),
+            }),
+          ])),
+    ]);
+  },
+};
 
 /* ── 目录密码 ───────────────────────────────────────── */
 const FolderPwd = {
@@ -396,6 +476,171 @@ async function startUpload() {
   m.redraw();
 }
 
+/* ── 视频切分（旁路 HLS） ─────────────────────────────── */
+// 与 tools/gen_hls.sh、mediaindex.HLSSegment 同一约定：
+//   <目录>/.hls/<文件名>/index.m3u8 + 分片
+// 隐藏目录不进浏览列表、不被索引，但 /d 可取流；之后 /fs/get 会给该视频带上
+// hls_url，浏览应用就自动优先走 HLS（没有清单时仍走 Range 直链）。
+// 逐文件发请求（与「上传」页同一套路）：各自有状态，一个失败不牵连其余。
+function hlsJoin(dir, name) {
+  return dir === '/' ? '/' + name : dir.replace(/\/+$/, '') + '/' + name;
+}
+
+function hlsSize(n) {
+  if (!n) return '—';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (i === 0 ? v : v.toFixed(v < 10 ? 1 : 0)) + ' ' + u[i];
+}
+
+async function listHlsVideos() {
+  const s = state.hls;
+  const d = await api('/fs/list', { method: 'POST', body: { path: s.path } });
+  s.files = ((d && d.content) || [])
+    // 只要视频，且把旁路自身的清单/分片排除掉（类型判定里 .m3u8/.ts 也算视频）
+    .filter(e => !e.is_dir && e.type === 2 && !/\.(m3u8|ts|m4s)$/i.test(e.name))
+    .map(e => ({ name: e.name, path: e.path || hlsJoin(s.path, e.name), size: e.size, status: 'pending' }));
+  s.sel = {};
+  s.listed = true;
+  say(s.files.length ? `列出 ${s.files.length} 个视频` : '该目录没有视频文件');
+}
+
+function toggleHlsAll(on) {
+  const s = state.hls;
+  s.sel = {};
+  if (on) s.files.forEach(f => { s.sel[f.path] = true; });
+}
+
+function hlsStatus(f) {
+  if (f.status === 'running') return '切分中…';
+  if (f.status === 'done') return f.skipped ? '已有清单，已跳过' : '完成';
+  if (f.status === 'error') return f.err || '切分失败';
+  return '待切分';
+}
+
+// 重新索引的状态与切分各记一份：两个操作常交替做（先修索引再切分），
+// 合成一格显示，谁的结果都不会被对方覆盖。
+function reindexStatus(f) {
+  if (f.rstatus === 'running') return '索引中…';
+  if (f.rstatus === 'done') return f.rnote || '已重新索引';
+  if (f.rstatus === 'error') return f.rerr || '索引失败';
+  return '';
+}
+
+function hlsCellText(f) {
+  const rs = reindexStatus(f);
+  return rs ? hlsStatus(f) + ' · ' + rs : hlsStatus(f);
+}
+
+function hlsCellClass(f) {
+  if (f.status === 'error' || f.rstatus === 'error') return 'err';
+  if (f.status === 'done' || f.rstatus === 'done') return 'ok';
+  return 'muted';
+}
+
+async function startHlsCut() {
+  const s = state.hls;
+  const queue = s.files.filter(f => s.sel[f.path]);
+  if (!queue.length) return;
+  s.busy = true;
+  const worker = async () => {
+    while (queue.length) {
+      const f = queue.shift();
+      f.status = 'running'; delete f.err;
+      m.redraw();
+      try {
+        const d = await api('/fs/hls', { method: 'POST', body: { path: f.path } });
+        f.status = 'done'; f.skipped = !!(d && d.skipped);
+      } catch (e) {
+        f.status = 'error'; f.err = e.message;
+      }
+      m.redraw();
+    }
+  };
+  // -c copy 主要是 I/O：并发 2 足够，再多不会更快，只会把磁盘打满
+  await Promise.all(Array.from({ length: Math.min(2, queue.length) }, worker));
+  s.busy = false;
+  m.redraw();
+  say('切分结束');
+}
+
+// 重新索引：**按增量重建**选中视频所在目录的 .index.jsonl。
+//
+// 判据全落在"索引里那条记录与文件现在的情况是否一致"：逐条比 name + size + 最后修改时间 ——
+// 一致就直接沿用旧行（sha1 与已提取的元数据都照抄，**不读文件内容**）；不一致（或没有旧行）
+// 才整读一遍重算 sha1。所以**勾选只决定刷新哪些目录**，不决定重算哪些文件。
+//
+// （早先对选中项所在目录整层强制重算，勾 1 个文件也要把同目录几十个视频全部重读；
+// 再后来改成"只强制点名的"，但那仍然无视了"文件变没变、一比就知道"这件事。）
+//
+// 一次请求带上全部选中项，由后端按目录归拢：索引按目录一份，逐个文件发请求会让同一个目录
+// 被重写 N 遍（见 handlers.FsReindex / mediaindex.RebuildFiles）。
+async function startReindex() {
+  const s = state.hls;
+  const picked = s.files.filter(f => s.sel[f.path]);
+  if (!picked.length) return;
+  s.busy = true;
+  picked.forEach(f => { f.rstatus = 'running'; delete f.rerr; delete f.rnote; });
+  m.redraw();
+  try {
+    const d = await api('/fs/reindex', { method: 'POST', body: { paths: picked.map(f => f.path) } });
+    picked.forEach(f => { f.rstatus = 'done'; f.rnote = '索引已刷新'; });
+    say(`重新索引完成：${d.files} 条记录，其中 ${d.rehashed} 条重算了 sha1（${d.dirs} 个目录）`);
+  } catch (e) {
+    picked.forEach(f => { f.rstatus = 'error'; f.rerr = e.message; });
+    say(e.message, true);
+  }
+  s.busy = false;
+  m.redraw();
+}
+
+const HlsCut = {
+  view() {
+    const s = state.hls;
+    const picked = s.files.filter(f => s.sel[f.path]).length;
+    return m('.panel', [
+      m('h2', '视频切分（HLS）'),
+      m('p.muted', '只切不转（-c copy）：画质不变、CPU 很低。产物写进 <目录>/.hls/<文件名>/，' +
+        '不进浏览列表、不被索引，但取流照常；之后浏览应用会自动优先走 HLS，没有清单的仍走 Range 直链。'),
+      m('label', [m('span', '目录路径（如 /media/电影）'),
+        m('input[type=text]', { value: s.path, oninput: e => s.path = e.target.value })]),
+      m('.row', [
+        m('button', { disabled: s.busy, onclick: () => guard(listHlsVideos) }, '列出视频'),
+        m('button.ghost', { disabled: s.busy || !s.files.length, onclick: () => toggleHlsAll(true) }, '全选'),
+        m('button.ghost', { disabled: s.busy || !s.files.length, onclick: () => toggleHlsAll(false) }, '清空选择'),
+        m('button', { disabled: s.busy || !picked, onclick: startHlsCut },
+          s.busy ? '切分中…' : `开始切分（${picked}）`),
+        // 重新索引：修"文件变了但索引没跟上"导致封面/简介不显示的情况（详见 startReindex）
+        m('button.ghost', {
+          disabled: s.busy || !picked,
+          title: '刷新勾选视频所在目录的 .index.jsonl：逐条比大小与最后修改时间，' +
+            '没变就沿用旧记录（不读文件内容），变了才重算 sha1。' +
+            '封面与简介按 sha1 寻址，换了文件却看不到封面时用它修。',
+          onclick: () => guard(startReindex),
+        }, s.busy ? '处理中…' : `重新索引（${picked}）`),
+      ]),
+      s.listed && !s.files.length
+        ? m('p.muted', '这个目录（当前这一层）没有视频文件')
+        : null,
+      s.files.length
+        ? m('table', [
+            m('thead', m('tr', [m('th', ''), m('th', '文件'), m('th', '大小'), m('th', '状态')])),
+            m('tbody', s.files.map(f => m('tr', [
+              m('td', m('input[type=checkbox]', {
+                checked: !!s.sel[f.path], disabled: s.busy,
+                onchange: e => { s.sel[f.path] = e.target.checked; },
+              })),
+              m('td', { title: f.path }, f.name),
+              m('td', hlsSize(f.size)),
+              m('td', { class: hlsCellClass(f) }, hlsCellText(f)),
+            ]))),
+          ])
+        : null,
+    ]);
+  },
+};
+
 /* ── 外壳 ───────────────────────────────────────────── */
 // Material 的 check 图标路径（M3 分段按钮的选中段用；尺寸由 CSS 定，与段宽无关）
 const CHECK_ICON = 'M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z';
@@ -405,6 +650,8 @@ const PAGES = [
   ['users', '用户', Users],
   ['folder', '目录密码', FolderPwd],
   ['upload', '上传', Upload],
+  ['hls', '视频切分', HlsCut],
+  ['settings', '全局选项', Settings],
 ];
 
 const App = {

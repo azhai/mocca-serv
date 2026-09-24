@@ -154,3 +154,44 @@ func TestStreamSupportsRange(t *testing.T) {
 		t.Errorf("分段内容不符，got %q want %q", rec.Body.String(), "video")
 	}
 }
+
+// TestStreamNoStoreOnlyWhenCredentialed 带凭证的取流不许被缓存；不带凭证的不加这条指令。
+//
+// 起因：/d 的地址上可能就挂着凭证（?token= / 受保护目录的 ?password=），也可能由
+// Authorization 头携带。这种响应被共享缓存或代理留下来，等于把内容连同凭证一起
+// 留在中间节点上。反过来，默认的游客浏览不该被加上这条 —— 那会让本来能缓存的流每次都重下。
+func TestStreamNoStoreOnlyWhenCredentialed(t *testing.T) {
+	e := newApp(t)
+	mediaFixture(t, e)
+	tok := makeUser(t, e, "u1", "p", models.RoleGeneral)
+
+	const noStore = "private, no-store"
+	for _, tc := range []struct {
+		name     string
+		raw      string
+		hdr      map[string]string
+		wantCode int
+		want     string
+	}{
+		{"游客不带凭证", "/d/media/v.mp4", nil, http.StatusOK, ""},
+		{"令牌走查询串", "/d/media/v.mp4?token=" + tok, nil, http.StatusOK, noStore},
+		{"令牌走请求头", "/d/media/v.mp4", map[string]string{"Authorization": tok}, http.StatusOK, noStore},
+		{"带了目录密码", "/d/media/v.mp4?password=x", nil, http.StatusOK, noStore},
+		// 失败响应同样要带：404 正属于「默认可被启发式缓存」的状态码
+		{"带凭证但文件不存在", "/d/media/missing.mp4?token=" + tok, nil, http.StatusNotFound, noStore},
+	} {
+		rec := serveRaw(t, e, tc.raw, tc.hdr)
+		if rec.Code != tc.wantCode {
+			t.Errorf("%s: 状态码 = %d, want %d", tc.name, rec.Code, tc.wantCode)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != tc.want {
+			t.Errorf("%s: Cache-Control = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	// 令牌无效时由 StreamAuth 中间件提前回 401，走不到 handler。这里不要求这条指令：
+	// 401 不在 RFC 9111「默认可被启发式缓存」的状态码清单里，本身不会被存下来。
+	if rec := serveRaw(t, e, "/d/media/v.mp4?token=not-a-jwt", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("坏令牌应 401，got %d", rec.Code)
+	}
+}

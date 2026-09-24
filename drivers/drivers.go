@@ -38,9 +38,9 @@ type Driver interface {
 	// Move 移动到另一个目录（目标目录相对同一存储根）。
 	Move(rel, dstDirRel string) error
 
-	// 元数据根（.mocca）操作，与媒体根可能不同：Local 的元数据根是内容根的上级
-	// （设备根），SMB 两者都在共享内、相同。封面/简介/is_new 走这里，媒体走上面那组。
-	// rel 仍以 `.mocca/xx/xx/<sha1>.ext` 相对元数据根。
+	// 元数据根（meta_dir / .mocca 目录本身）操作，与媒体根可能不同：
+	// Local 默认在内容根下的 .mocca，SMB 默认在共享内的 .mocca，均可配置到别处。
+	// 封面/简介/is_new 走这里，媒体走上面那组。rel 以 `xx/xx/<sha1>.ext` 相对元数据根。
 	MetaStat(rel string) (Entry, error)
 	MetaOpen(rel string) (io.ReadSeeker, int64, error)
 	MetaMkdirAll(rel string) error

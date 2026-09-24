@@ -77,14 +77,17 @@ type MediaObj struct {
 // Header 是 APP `parsedHeaders()` 要的多行 `Key: Value` 字符串，**不是 map**：
 // 写成 map 会让 APP 侧解析失败。Provider 同理，缺失时 APP 取默认值。
 type MediaDetail struct {
-	Name     string   `json:"name"`
-	Size     int64    `json:"size"`
-	IsDir    bool     `json:"is_dir"`
-	Type     int      `json:"type"`
-	Thumb    string   `json:"thumb"`
-	Sign     string   `json:"sign"`
-	Modified string   `json:"modified"`
-	RawURL   string   `json:"raw_url"`
+	Name     string `json:"name"`
+	Size     int64  `json:"size"`
+	IsDir    bool   `json:"is_dir"`
+	Type     int    `json:"type"`
+	Thumb    string `json:"thumb"`
+	Sign     string `json:"sign"`
+	Modified string `json:"modified"`
+	RawURL   string `json:"raw_url"`
+	// HLSURL 旁路（sidecar）m3u8 清单地址，可选：同目录隐藏子目录里已有清单时才非空。
+	// 服务端只把清单文本当普通文件发给客户端，分片同理；生成在服务端之外，不在请求时切片。
+	HLSURL   string   `json:"hls_url,omitempty"`
 	Header   string   `json:"header"`
 	Provider string   `json:"provider"`
 	Title    string   `json:"title,omitempty"`
@@ -262,16 +265,59 @@ func providerName(driver string) string {
 // 0 在契约里专指目录。
 func guessType(name string) int {
 	switch strings.ToLower(filepath.Ext(name)) {
-	case ".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".m3u8", ".ts":
-		return models.MediaVideo
-	case ".mp3", ".flac", ".wav", ".aac", ".ogg", ".m4a", ".wma":
-		return models.MediaAudio
-	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".avif":
-		return models.MediaImage
 	case ".txt", ".md", ".srt", ".ass", ".vtt", ".json", ".nfo":
 		return models.MediaText
 	}
-	return models.MediaUnknown
+	// 图片/音频/视频统一走 mediaindex.MediaKindOf：**列表里认得出的，索引就一定会收录**。
+	// 这里曾经自带一份更宽的清单，与索引收录用的扩展名清单不一致，于是
+	// .mkv 这类文件能显示、却进不了索引（拿不到 sha1 → 海报一直 404）。
+	return mediaindex.MediaKindOf(name)
+}
+
+// hlsAssetExts 旁路 HLS 自身的扩展名：清单与分片不该再回头找「自己的清单」。
+var hlsAssetExts = map[string]bool{".m3u8": true, ".ts": true, ".m4s": true}
+
+// isHLSAsset 判断是不是旁路 HLS 的清单/分片文件。
+func isHLSAsset(name string) bool {
+	return hlsAssetExts[strings.ToLower(filepath.Ext(name))]
+}
+
+// streamContentTypes 取流时要钉死的内容类型。
+//
+// Go 内置 mime 表**没有** .m3u8/.ts 映射（只有系统装了 /etc/apache2/mime.types
+// 之类才靠它兜底），而清单若不是 application/vnd.apple.mpegurl，Safari 原生 HLS
+// 会直接拒播。所以这里不赌运行环境，按扩展名显式指定。
+var streamContentTypes = map[string]string{
+	".m3u8": "application/vnd.apple.mpegurl",
+	".ts":   "video/mp2t",
+	".m4s":  "video/iso.segment",
+	".vtt":  "text/vtt",
+}
+
+// setStreamContentType 在 http.ServeContent 之前把内容类型定好：
+// ServeContent 只在响应头还没有 Content-Type 时才去按扩展名/嗅探猜，先设好它就照用。
+func setStreamContentType(h http.Header, name string) {
+	if ct, ok := streamContentTypes[strings.ToLower(filepath.Ext(name))]; ok {
+		h.Set("Content-Type", ct)
+	}
+}
+
+// setNoStoreIfCredentialed 给「带了凭证」的取流响应打上不许缓存的指令。
+//
+// 为什么：/d 的地址上可能就挂着凭证（?token= 或受保护目录的 ?password=），
+// 也可能由 Authorization 头携带。这种响应一旦被共享缓存/代理存下来，
+// 等于把内容连同凭证一起留在了中间节点上。
+// 不带任何凭证的请求（默认的游客浏览）不加这条指令，保持原来的可缓存行为。
+//
+// 注意 no-store 也会让浏览器不缓存这段流：来回拖进度条会重新发请求。
+// 这是刻意的取舍 —— 带凭证的内容优先保证不落缓存。
+func setNoStoreIfCredentialed(c *echo.Context) {
+	req := c.Request()
+	if req.Header.Get("Authorization") == "" &&
+		c.QueryParam("token") == "" && c.QueryParam("password") == "" {
+		return
+	}
+	c.Response().Header().Set("Cache-Control", "private, no-store")
 }
 
 // FsList 列目录。
@@ -566,12 +612,30 @@ func FsGet(c *echo.Context) error {
 		RawURL:   rawURL(c, req.Path),
 	}
 
+	// 旁路 HLS：同目录隐藏子目录里若已有外部队列好的清单，就把它的地址一并发出去，
+	// 客户端据此可以改走 m3u8（弱网下能按分片续拉）。没有清单就只回 raw_url。
+	if !info.IsDir && !isHLSAsset(info.Name) && objType(info.Name, false) == models.MediaVideo {
+		if hlsRel := mediaindex.HLSPlaylistRel(rel); hlsRel != "" {
+			if _, serr := drv.Stat(hlsRel); serr == nil {
+				detail.HLSURL = rawURL(c, mediaindex.HLSPlaylistPath(req.Path))
+			}
+		}
+	}
+
 	// 附加信息走设备 .mocca/<sha1>.json，是可选增强：没有就只回基础字段
-	if sha1hex, _, _ := mediaExtraInfo(drv, rel); sha1hex != "" {
+	if sha1hex, _, posterOK := mediaExtraInfo(drv, rel); sha1hex != "" {
 		if sd, err := readSummaryJSON(drv, sha1hex); err == nil && sd != nil {
 			detail.Desc = sd.Summary
 			for _, ns := range [][]string{sd.Cast, sd.Lead, sd.Backing, sd.Instrument} {
 				detail.Authors = append(detail.Authors, ns...)
+			}
+		}
+		// 封面：海报**相对 meta_dir 的路径**（形如 xx/xx/<sha1>.png）。它已经是
+		// 统一处理过的 400×300 高压缩 PNG（上传/截图/刮削三条路都走 ResizeCoverPNG）。
+		// 要显示请用 /meta/poster?path= 而不是拼这个路径。
+		if posterOK {
+			if pr, err := mediaindex.PosterRel(sha1hex); err == nil {
+				detail.Cover = filepath.ToSlash(pr)
 			}
 		}
 	}
@@ -978,6 +1042,49 @@ func FsCov(c *echo.Context) error {
 	return helpers.OK(c, nil)
 }
 
+// FsUncov 删除某个音/视频的封面（管理员）。
+//
+// 与「上传封面」「FFmpeg 截图」相对：那两条路是**替换**封面，这条是把封面清掉、
+// 回到"没有封面"的状态（之后重新刮削就会重新取 TMDB 海报，因为海报文件已不存在）。
+// 同样依赖 .index.jsonl 定位 sha1 —— 封面按 sha1 寻址。
+func FsUncov(c *echo.Context) error {
+	var req GetReq
+	if err := c.Bind(&req); err != nil || req.Path == "" {
+		req.Path = c.QueryParam("path")
+	}
+	if req.Path == "" {
+		return helpers.Fail(c, helpers.CodeBadRequest, "缺少 path")
+	}
+	stor, rel, err := resolveStorageStrict(req.Path)
+	if err != nil {
+		return helpers.Fail(c, helpers.CodeNotFound, err.Error())
+	}
+	drv, err := drivers.Open(stor)
+	if err != nil {
+		return helpers.Fail(c, helpers.CodeInternal, err.Error())
+	}
+	defer func() { _ = drv.Close() }()
+
+	sha1, _, posterOK := mediaExtraInfo(drv, rel)
+	if sha1 == "" {
+		return helpers.Fail(c, helpers.CodeBadRequest, "请先执行索引生成 .index.jsonl")
+	}
+	if !posterOK {
+		return helpers.OK(c, map[string]any{"path": req.Path, "removed": false}) // 本来就没有，幂等
+	}
+	posterRel, err := mediaindex.PosterRel(sha1)
+	if err != nil {
+		return helpers.Fail(c, helpers.CodeBadRequest, "无法定位封面路径")
+	}
+	if rerr := drv.MetaRemove(posterRel); rerr != nil {
+		return helpers.Fail(c, helpers.CodeInternal, "删除封面失败: "+rerr.Error())
+	}
+	// 封面没了 → 重扫一层让 is_new 翻回 1（列表重新标成"待补封面"）。
+	// 失败不阻断：下次扫描仍会修正它。
+	_ = mediaindex.ScanDir(drv, path.Dir(rel))
+	return helpers.OK(c, map[string]any{"path": req.Path, "removed": true})
+}
+
 // writePosterBytes 把已校验的图片字节写入某文件的 .mocca 海报位置，幂等覆盖旧图。
 // 校验由各调用方各自负责（上传前的图片解码 / 截图后的输出校验）。
 func writePosterBytes(drv drivers.Driver, posterRel string, data []byte) error {
@@ -1217,6 +1324,173 @@ func FsPatch(c *echo.Context) error {
 	})
 }
 
+// HlsReq 视频切分请求：把一个视频切成旁路 HLS（清单 + 分片）。
+type HlsReq struct {
+	Path  string `json:"path"`
+	Force bool   `json:"force"` // 已有清单时是否重切
+}
+
+// FsHLS 把一个视频切成旁路 HLS（管理员）。
+//
+// 只切不转（ffmpeg -c copy）：耗时与 CPU 都低，画质与原文件一致，产物写进
+// <目录>/.hls/<文件名>/（点开头，不进列表、不被索引，但 /d 可取流）。之后
+// /fs/get 会给该视频带上 hls_url，浏览应用就会**优先走 HLS**，没有清单时仍走 Range 直链。
+//
+// 一次只处理一个文件：后台「视频切分」页对多选逐个发请求，各自报进度，
+// 某个失败也不会牵连其余。已有的清单默认跳过，force=true 才重切。
+func FsHLS(c *echo.Context) error {
+	var req HlsReq
+	if err := c.Bind(&req); err != nil || req.Path == "" {
+		req.Path = c.QueryParam("path")
+		if req.Path == "" {
+			req.Path = c.FormValue("path")
+		}
+	}
+	if req.Path == "" {
+		return helpers.Fail(c, helpers.CodeBadRequest, "缺少 path")
+	}
+
+	stor, rel, err := resolveStorageStrict(req.Path)
+	if err != nil {
+		return helpers.Fail(c, helpers.CodeNotFound, err.Error())
+	}
+	drv, err := drivers.Open(stor)
+	if err != nil {
+		return helpers.Fail(c, helpers.CodeInternal, err.Error())
+	}
+	defer func() { _ = drv.Close() }()
+
+	info, err := drv.Stat(rel)
+	if err != nil {
+		return helpers.Fail(c, helpers.CodeNotFound, "文件不存在")
+	}
+	if info.IsDir || objType(info.Name, false) != models.MediaVideo || isHLSAsset(info.Name) {
+		return helpers.Fail(c, helpers.CodeBadRequest, "仅视频文件支持切分为 HLS")
+	}
+
+	_, skipped, err := mediaindex.HLSSegment(drv, rel, req.Force)
+	if err != nil {
+		return helpers.Fail(c, helpers.CodeInternal, err.Error())
+	}
+	return helpers.OK(c, map[string]any{
+		"path":     req.Path,
+		"playlist": mediaindex.HLSPlaylistPath(req.Path),
+		"skipped":  skipped,
+	})
+}
+
+// ReindexReq 重新索引请求：按增量重建选中条目所在目录的 .index.jsonl
+// （索引按目录一份，写入必然是整份；是否重算 sha1 由 size+modified 比对决定）。
+type ReindexReq struct {
+	Path  string   `json:"path"`  // 单路径（兼容脚本调用）
+	Paths []string `json:"paths"` // 批量（后台「视频切分」页多选）
+}
+
+// FsReindex 重新索引（管理员）：**按增量重建**选中条目所在目录的 `.index.jsonl`。
+//
+// 语义就是"这个目录的索引，按当前实际情况重建一遍"，代价全在判据上：逐条比
+// **name + size + modified** ——
+//
+//   - 与索引里那条一致 → 直接沿用旧行（sha1 与已提取的元数据照抄，**不读文件内容**）；
+//   - 不一致 / 没有旧行 → 整读一遍算 sha1，并重新解析元数据。
+//
+// 所以**勾选只决定"刷新哪些目录"**，不决定重算哪些文件 —— 这一点被改过两次：
+// 早先对选中项所在目录**整层强制重算**，勾 1 个文件也要把同目录几十个视频全部重读
+// （20 个 4GB 的片子 = 80GB I/O），点一次「重新索引」要等很久；再后来改成"只强制点名的"，
+// 但那仍然无视了一个事实——**文件变没变，size+modified 一比就知道**，不该无条件重读。
+//
+// 想整层强制重算（同名同大小、mtime 也被保留、内容却被换过的极少数情况）：
+// 走 mediaindex.RebuildFiles 的 force 参数，本接口不暴露（正常路径不需要）。
+//
+// 多选时按目录归拢：同一个目录只重写一次索引（写入在 mediaindex 里另有 indexMu 串行化，
+// 这里不依赖它防重复）。回包 `files` = 写进索引的记录数，`rehashed` = 其中真正重算了 sha1 的条数。
+func FsReindex(c *echo.Context) error {
+	var req ReindexReq
+	if err := c.Bind(&req); err != nil {
+		req.Path = c.QueryParam("path")
+	}
+	paths := req.Paths
+	if req.Path != "" {
+		paths = append(paths, req.Path)
+	}
+	if len(paths) == 0 {
+		return helpers.Fail(c, helpers.CodeBadRequest, "请先选择要重新索引的文件")
+	}
+
+	// 按存储分组：一批勾选可能跨挂载点，每个存储要单独开驱动。
+	storOf := map[string]*models.Storage{}
+	relsOf := map[string][]string{}
+	var mounts []string
+	for _, p := range paths {
+		stor, rel, err := resolveStorageStrict(p)
+		if err != nil {
+			return helpers.Fail(c, helpers.CodeNotFound, err.Error())
+		}
+		if _, ok := relsOf[stor.MountPath]; !ok {
+			mounts = append(mounts, stor.MountPath)
+			storOf[stor.MountPath] = stor
+		}
+		relsOf[stor.MountPath] = append(relsOf[stor.MountPath], rel)
+	}
+
+	dirs, files, rehashed := 0, 0, 0
+	for _, mount := range mounts {
+		err := func() error {
+			drv, oerr := drivers.Open(storOf[mount])
+			if oerr != nil {
+				return oerr
+			}
+			defer func() { _ = drv.Close() }()
+
+			// 勾选只用来定"刷新哪些目录"：索引按目录一份，同一个目录只重写一次。
+			var order []string
+			seen := map[string]bool{}
+			for _, rel := range relsOf[mount] {
+				// 先 Stat：一是要区分"传进来的是目录"（刷新它本身），
+				// 二是不存在时必须明确报错 —— 早先这里失败会静默退到 path.Dir，
+				// 结果写错一个文件名就去把它的父目录重建了一遍，非常难发现。
+				info, serr := drv.Stat(rel)
+				if serr != nil {
+					return errors.Wrapf(errReindexMissing, "%s 不存在", rel)
+				}
+				dir := path.Dir(rel)
+				if info.IsDir {
+					dir = rel
+				}
+				if seen[dir] {
+					continue // 同一目录只重写一次索引
+				}
+				seen[dir] = true
+				order = append(order, dir)
+			}
+
+			for _, dir := range order {
+				// force 传空：重建完全按增量判据（size+modified 与旧行比），
+				// 文件没变就不重读 —— 这就是"做增量的重建"。
+				written, n, rerr := mediaindex.RebuildFiles(drv, dir, nil)
+				if rerr != nil {
+					return errors.Wrapf(rerr, "重建 %s 的索引失败", dir)
+				}
+				dirs++
+				files += written
+				rehashed += n
+			}
+			return nil
+		}()
+		if errors.Is(err, errReindexMissing) {
+			return helpers.Fail(c, helpers.CodeNotFound, err.Error())
+		}
+		if err != nil {
+			return helpers.Fail(c, helpers.CodeInternal, err.Error())
+		}
+	}
+	return helpers.OK(c, map[string]any{"dirs": dirs, "files": files, "rehashed": rehashed})
+}
+
+// errReindexMissing 重新索引时某个路径不存在。单独一个哨兵值，好把它映射成 404
+// 而不是笼统的 500 —— 这是调用方能自己修的错。
+var errReindexMissing = errors.New("路径不存在")
+
 // FsRename 同目录改名（管理员）。
 func FsRename(c *echo.Context) error {
 	var req struct {
@@ -1291,6 +1565,11 @@ func downloadPath(c *echo.Context) string {
 // 会被播放器直接当成媒体字节流解析，若失败也回 HTTP 200 + JSON 信封，
 // 播放器只会报「格式不支持」这类与真实原因无关的错。
 func Download(c *echo.Context) error {
+	// 放在最前面：handler 自己产出的失败响应（如文件不存在的 404）也要带上这条指令。
+	// 404 正属于 RFC 9111 里「默认可被启发式缓存」的状态码，不标就会留在中间节点上。
+	// （令牌无效时由 StreamAuth 提前回 401，根本走不到这里；401 不在那个清单里。）
+	setNoStoreIfCredentialed(c)
+
 	path := downloadPath(c)
 	if path == "" {
 		return helpers.FailStatus(c, helpers.CodeBadRequest, "路径为空")
@@ -1315,7 +1594,12 @@ func Download(c *echo.Context) error {
 	}
 	defer func() { _ = f.(interface{ Close() error }).Close() }()
 
+	// 旁路 HLS 的清单/分片要按标准类型发出（m3u8/ts 不赌 Go 的内置 mime 表），
+	// 其余仍交给 ServeContent 按扩展名/嗅探决定。
+	setStreamContentType(c.Response().Header(), filepath.Base(path))
+
 	// ServeContent 支持 Range 请求：播放器拖动进度条、断点续传都靠它。
+	// 直链（无旁路清单时的默认路径）走的就是这里。
 	http.ServeContent(c.Response(), c.Request(), filepath.Base(path), time.Now(), f)
 	return nil
 }

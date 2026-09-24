@@ -37,10 +37,9 @@ func seedIndexedMedia(t *testing.T, root string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// .mocca 落在设备根（内容根 root 的上级），因为 seed 的 root 是设备根下的内容子目录
-	metaRoot := filepath.Dir(root)
-	writeTestFile(t, metaRoot, filepath.ToSlash(pr), string(png))
-	writeTestFile(t, metaRoot, filepath.ToSlash(sr), `{"summary":"测试简介"}`)
+	// 默认 meta_dir 是内容根下的 .mocca，所以附加信息写在 root/.mocca 下
+	writeTestFile(t, root, filepath.Join(".mocca", filepath.ToSlash(pr)), string(png))
+	writeTestFile(t, root, filepath.Join(".mocca", filepath.ToSlash(sr)), `{"summary":"测试简介"}`)
 	return png
 }
 
@@ -86,6 +85,47 @@ func TestMetaPosterServesPngOr404(t *testing.T) {
 	// 无该索引：404
 	if rec := get("/meta/poster?path=/media/nope.mp4"); rec.Code != 404 {
 		t.Errorf("无索引文件海报应 404，got %d", rec.Code)
+	}
+}
+
+// TestFsUncovRemovesPoster 删除封面：删掉之后 /meta/poster 变 404，并且重复调用是幂等的。
+// 它与「上传封面 / FFmpeg 截图」相对：那两条是替换，这条是清空 —— 清空后再刮削会重新取 TMDB 海报。
+func TestFsUncovRemovesPoster(t *testing.T) {
+	e := newApp(t)
+	root := t.TempDir()
+	addStorage(t, "/media", "Local", root)
+	seedIndexedMedia(t, root)
+	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
+
+	getPoster := func() int {
+		req := httptest.NewRequest(http.MethodGet, "/meta/poster?path=/media/a.mp4", nil)
+		req.Header.Set("Authorization", admin)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if code := getPoster(); code != http.StatusOK {
+		t.Fatalf("前置条件不成立：封面应已存在，got %d", code)
+	}
+
+	code, resp := call(t, e, http.MethodPost, "/api/fs/uncov", `{"path":"/media/a.mp4"}`, admin)
+	if code != 200 {
+		t.Fatalf("删除封面应成功，got %d msg=%v", code, resp["message"])
+	}
+	if d, _ := resp["data"].(map[string]any); d["removed"] != true {
+		t.Errorf("应报告已删除: %v", d)
+	}
+	if code := getPoster(); code != http.StatusNotFound {
+		t.Errorf("删除后 /meta/poster 应 404，got %d", code)
+	}
+
+	// 幂等：本来就没有封面时不算失败
+	code, resp = call(t, e, http.MethodPost, "/api/fs/uncov", `{"path":"/media/a.mp4"}`, admin)
+	if code != 200 {
+		t.Fatalf("重复删除应成功，got %d msg=%v", code, resp["message"])
+	}
+	if d, _ := resp["data"].(map[string]any); d["removed"] != false {
+		t.Errorf("本来就没有封面应回 removed=false: %v", d)
 	}
 }
 
@@ -146,7 +186,7 @@ func TestFsEditWritesSummaryJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(root), filepath.ToSlash(sr)))
+	data, err := os.ReadFile(filepath.Join(root, ".mocca", filepath.ToSlash(sr)))
 	if err != nil {
 		t.Fatalf("应写出 .mocca 附加信息: %v", err)
 	}
@@ -397,8 +437,8 @@ func TestFsShotWritesFrameAsPoster(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("截图应成功, code=%d msg=%v", code, resp["message"])
 	}
-	// 海报写在设备根（内容根上级）的 .mocca 下，应出现可解码的 PNG
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(root), filepath.ToSlash(pr)))
+	// 海报写在内容根下的 .mocca 下，应出现可解码的 PNG
+	data, err := os.ReadFile(filepath.Join(root, ".mocca", filepath.ToSlash(pr)))
 	if err != nil {
 		t.Fatalf("海报未写入: %v", err)
 	}
