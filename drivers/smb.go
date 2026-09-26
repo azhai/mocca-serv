@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -180,6 +181,9 @@ func (d *SMB) Move(rel, dstDirRel string) error {
 	return errors.WithStack(d.conn.share.Rename(src, dst))
 }
 
+// Identity 用连接池的 key（共享地址 + 账号 + 共享名）：同一块共享盘每次打开都一致。
+func (d *SMB) Identity() string { return d.key }
+
 // Close 归还连接到池里，不真正断开：
 // 每次请求都重连的代价太高，空闲超时由池统一回收（见 smbpool.go）。
 func (d *SMB) Close() error {
@@ -203,4 +207,21 @@ func (d *SMB) MetaMkdirAll(rel string) error {
 func (d *SMB) MetaCreate(rel string) (io.WriteCloser, error) {
 	return d.createAt(d.metaFull(rel))
 }
+
+// MetaAppend 追加打开。SMB 侧用 FILE_APPEND_DATA 取代 GENERIC_WRITE：
+// 这样服务端的每次写都定位到文件末尾，多个客户端并发追加不会互相覆盖。
+func (d *SMB) MetaAppend(rel string) (io.WriteCloser, error) {
+	p := d.metaFull(rel)
+	if dir := filepath.Dir(p); dir != "" && dir != "." {
+		if err := d.conn.share.MkdirAll(dir, 0o755); err != nil {
+			return nil, errors.WithStack(err)
+		}
+	}
+	f, err := d.conn.share.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o666)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	return f, nil
+}
+
 func (d *SMB) MetaRemove(rel string) error { return d.removeAt(d.metaFull(rel)) }

@@ -46,6 +46,15 @@ type Driver interface {
 	MetaMkdirAll(rel string) error
 	MetaCreate(rel string) (io.WriteCloser, error)
 	MetaRemove(rel string) error
+	// Identity 这块存储的稳定标识（同一块盘每次打开都返回同一个值）。
+	// 给"按存储划分的进程内缓存"当命名空间：缓存若只按 sha1 分，两块盘上放着同一个
+	// 视频（sha1 相同）就会互相串 —— 弹幕读到别的盘上去。
+	Identity() string
+	// MetaAppend 以**追加**方式打开元数据根下的文件（不存在则建）。
+	// MetaCreate 是整体覆写，写弹幕这种"高频加一行"的场景用它代价是 O(整个文件)：
+	// 每次都要读回全文再重写一遍。追加写是 O(一行)，且单行不超过 PIPE_BUF 时
+	// 内核保证原子 —— 这是弹幕能扛住高并发发送的前提。
+	MetaAppend(rel string) (io.WriteCloser, error)
 	Close() error
 }
 

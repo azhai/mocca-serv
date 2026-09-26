@@ -36,6 +36,8 @@ const I = {
   open: 'M19 19H5V5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7h-2v7zM14 3v2h3.59l-9.3 9.29 1.42 1.42L19 6.41V10h2V3h-7z',
   // 笔：管理员编辑媒体信息的入口按钮
   edit: 'M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z',
+  // 对话气泡：评论入口（与编辑的笔分开，别让人误点是编辑）
+  comment: 'M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z',
 };
 
 // 媒体类型，取值与 models/media.go 的 MediaKind 一一对应
@@ -66,6 +68,10 @@ const state = {
   lb: null,   // 图片预览 { imgs:[{name,path}], i, zoom, x, y, url, loading }
   toast: '', toastErr: false,
   isAdmin: false,  // /me 返回角色为管理员时为 true，据此显示媒体条目右上角的编辑钮
+  uid: 0,          // /me 返回的用户 id：用来判断"这条弹幕/评论是不是我发的"
+  username: '',    // /me 返回的昵称（发出去时服务端会快照进记录，这里只用于本地提示）
+  dm: null,        // 弹幕态（打开视频时才有，见 openDanmaku）
+  cmt: null,       // 评论弹窗态（见 openComments）：{ path, name, list, text, replyTo, ... }
   edit: null,      // 编辑弹窗 { path, name, summary, director, cast, year, region, studio, loading }
   urlOf: new Map(), // 路径 → 可直接播放/预览的地址（服务端 raw_url 口径）
 };
@@ -848,8 +854,11 @@ async function play(p, entry) {
   try { ({ url, hls } = await driveMedia(p)); } catch (e) { /* 用上面的直链兜底 */ }
   state.player = { kind: entry.type === KIND.video ? 'video' : 'audio', url, hls, name: entry.name, path: p };
   m.redraw();
+  // 弹幕只跟视频走：它是"对着画面某一刻"的发言，音频没有画面可对。
+  if (entry.type === KIND.video) await openDanmaku(p);
 }
 function closePlayer() {
+  closeDanmaku();
   state.player = null;
   m.redraw();
 }
@@ -1124,6 +1133,11 @@ const Files = {
               ? m('button.edit-btn.inline', { title: '编辑信息', onclick: ev => { ev.stopPropagation(); guard(() => openEdit(e)); } },
                   m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.edit })))
               : null,
+            // 评论（排在编辑之后）：**所有媒体条目都有**，不是管理员专属
+            !e.is_dir
+              ? m('button.edit-btn.inline', { title: '评论', onclick: ev => { ev.stopPropagation(); openComments(e); } },
+                  m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.comment })))
+              : null,
           ]),
           // 主演一行：主演在左、年份贴最右（两者都无则不占位）；导演不在网格显示
           (e.cast && e.cast.length) || e.year
@@ -1150,22 +1164,25 @@ const Files = {
       gridPager(),
       ]);
     }
+    // 操作列只要有**任意一个媒体条目**就得留出来 —— 评论按钮对所有媒体条目都有
+    // （编辑才限管理员），所以不能再用 state.isAdmin 决定这一列是否存在。
+    const hasOps = list.some(e => !e.is_dir);
     return m('.files', m('table.filetable', [
       // colgroup 固定列宽：名称自适应剩余宽度，大小/修改时间定宽。
       // table-layout: fixed + colgroup 是表头与表体严格对齐的最稳做法；
       // 列宽给足，日期(如 2026-09-17 14:30)与大小(如 1.2 GB)不会溢出到相邻列。
-      // 管理员登录时末尾多一列「操作」放编辑钮。
+      // 末尾「操作」列放按钮：编辑（管理员）+ 评论（所有人），评论排在编辑之后。
       m('colgroup', [
         m('col'),
         m('col.hide-sm', { style: 'width:130px' }),
         m('col.hide-sm', { style: 'width:190px' }),
-        state.isAdmin ? m('col.op-col', { style: 'width:64px' }) : null,
+        hasOps ? m('col.op-col', { style: 'width:96px' }) : null,
       ]),
       m('thead', m('tr', [
         m('th', '名称'),
         m('th.num.hide-sm', '大小'),
         m('th.num.hide-sm', '修改时间'),
-        state.isAdmin ? m('th.op', '操作') : null,
+        hasOps ? m('th.op', '操作') : null,
       ])),
       m('tbody', list.map(e => m('tr.row', { key: e.name, onclick: () => onOpen(e), title: e.name }, [
         m('td', m('.fname', [
@@ -1175,11 +1192,16 @@ const Files = {
         ])),
         m('td.num.hide-sm', e.is_dir ? '—' : fmtSize(e.size)),
         m('td.num.hide-sm', fmtTime(e.modified)),
-        // 操作列：只给媒体条目放编辑钮（目录无附加信息可改）
-        state.isAdmin
-          ? m('td.op', e.is_dir ? null
-              : m('button.edit-btn.small', { title: '编辑信息', onclick: ev => { ev.stopPropagation(); guard(() => openEdit(e)); } },
-                  m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.edit }))))
+        // 操作列：目录没有可评论/可编辑的东西，留空
+        hasOps
+          ? m('td.op', e.is_dir ? null : [
+              state.isAdmin
+                ? m('button.edit-btn.small', { title: '编辑信息', onclick: ev => { ev.stopPropagation(); guard(() => openEdit(e)); } },
+                    m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.edit })))
+                : null,
+              m('button.edit-btn.small', { title: '评论', onclick: ev => { ev.stopPropagation(); openComments(e); } },
+                m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.comment }))),
+            ])
           : null,
       ]))),
     ]));
@@ -1259,23 +1281,351 @@ function startVideo(el, p) {
   }).catch(() => { el.src = p.url; }); // hls.js 都拉不到，退回直链
 }
 
+/* ── 弹幕与评论 ─────────────────────────────────────────
+   数据都在**设备侧**：<存储根>/.mocca/xx/xx/<sha1>.danmaku.jsonl（见后端 mediaindex/danmaku.go），
+   不进数据库 —— 弹幕跟着盘走，换机器/重装服务/把硬盘拔下来带走都还在。
+   评论就是「时间点为 0 的弹幕」，所以两者共用一份存储与一套接口。
+   前端只说 path，path → sha1 的换算在服务端做。 */
+const DM_LIMIT = 50;    // 与后端 mediaindex.MaxDanmakuLength 对齐
+const DM_TRACKS = 6;    // 同屏轨道数：再多就挤成一片，再少会互相压住
+const DM_LIFE = 8;      // 一条弹幕飞过屏幕的秒数（CSS 的 --dm-life 必须与它一致）
+
+const avatarURL = key => '/static/avatars/' + (key || '01') + '.png';
+
+// openDanmaku 打开视频时准备弹幕：先拉一次全量，再开 SSE 收新的。
+// 连接建立**之前**发的那几条不靠 SSE 补 —— 它们本来就该在这次全量里。
+//
+// 播放器里**不放评论**（用户要求）：看片时画面越干净越好，评论是"看完再聊"。
+// 评论有独立入口（媒体条目上的评论按钮，见 openComments）。
+async function openDanmaku(mediaPath) {
+  // 直接换片（正在看 A 又点开 B）时会再次进来：**先把上一个收掉**，
+  // 否则那条 SSE 会一直连着，还往已经没人看的状态里写。
+  closeDanmaku();
+  const d = {
+    path: mediaPath, rows: [], active: [],
+    cursor: 0, last: -1, seq: 0, paused: false,
+    text: '', busy: false, es: null,
+  };
+  state.dm = d;
+  startDmTick();
+  try {
+    const rows = await api('/danmaku?path=' + encodeURIComponent(mediaPath));
+    if (state.dm !== d) return;   // 拉的过程中换片/关掉了，丢弃
+    d.rows = rows || [];
+    m.redraw();
+  } catch (e) { say(e.message, true); }
+  d.es = openEntryStream(mediaPath, e => {
+    if (state.dm !== d || e.type !== 1) return;   // 播放器只吃弹幕
+    if (d.rows.some(x => x.id === e.id)) return;  // 自己刚发的：本地已经排进去了
+    d.rows.push(e);
+    d.rows.sort((a, b) => a.offset - b.offset);
+    m.redraw();
+  });
+}
+
+// closeDanmaku 关播放器时收摊：SSE 必须显式 close（EventSource 不会因为页面元素没了就自己断），
+// 否则换个片子看，旧的流还在后台连着、还在往已经废弃的状态里写。
+function closeDanmaku() {
+  stopDmTick();
+  if (state.dm && state.dm.es) { try { state.dm.es.close(); } catch (_) { /* 已断开 */ } }
+  state.dm = null;
+}
+
+// openEntryStream 订阅某媒体的新弹幕/新评论（SSE），返回 EventSource，由调用方负责 close。
+//
+// 同一个流里两类都推（弹幕与评论共用一个发布通道），调用方按需要过滤。
+// EventSource 自带断线重连，所以**出错时不要 close**，一 close 就再也不重连了。
+function openEntryStream(mediaPath, onEntry) {
+  if (!window.EventSource) return null;   // 老浏览器：退化成"打开时拉一次"
+  const q = new URLSearchParams({ path: mediaPath });
+  if (state.token) q.set('token', state.token);   // EventSource 带不了自定义请求头
+  const es = new EventSource(state.base + '/danmaku/stream?' + q.toString());
+  es.addEventListener('danmaku', ev => {
+    let e;
+    try { e = JSON.parse(ev.data); } catch (_) { return; }
+    onEntry(e);
+  });
+  return es;
+}
+
+// mergeComment 把一条评论并进列表。列表本身是**最新在最上面**（后端已按撰写时间倒序），
+// 所以顶层评论插到最前面；回复追加到父评论的回复末尾（回复保持正序，读起来才像对话）。
+// 父评论不在了（别人刚删）就丢掉 —— 与后端"孤儿回复不展示"保持一致。
+function mergeComment(list, e) {
+  if (list.some(t => t.id === e.id)) return false;
+  if (!e.parent_id) {
+    list.unshift({ ...e, replies: [] });
+    return true;
+  }
+  const parent = list.find(t => t.id === e.parent_id);
+  if (!parent) return false;
+  parent.replies = (parent.replies || []).concat(e);
+  return true;
+}
+
+// 弹幕心跳：每 200ms 按当前播放位置把弹幕放上屏、把飞出去的清掉。
+//
+// 为什么不用 <video> 的 timeupdate：它不均匀（解码卡一下会攒一堆），弹幕会一顿一顿地冒出来。
+// 用定时器读 currentTime，出来才是匀速的。
+let dmTimer = null;
+function startDmTick() {
+  stopDmTick();
+  dmTimer = setInterval(() => {
+    const d = state.dm;
+    const v = document.querySelector('.playbox video');
+    if (!d || !v) return;
+    const now = v.currentTime * 1000;
+    let changed = false;
+
+    if (d.last >= 0 && now < d.last - 1200) { d.cursor = 0; changed = true; }  // 往回拖：重排游标
+    d.last = now;
+    // 往前跳到没看过的位置：跳过那些"已经过去"的弹幕，不补放（补放等于一次刷屏）
+    while (d.cursor < d.rows.length && d.rows[d.cursor].offset < now - 1000) d.cursor++;
+    // 已经到点的弹幕放上屏
+    while (d.cursor < d.rows.length && d.rows[d.cursor].offset <= now + 250) {
+      const row = d.rows[d.cursor++];
+      const track = d.seq % DM_TRACKS;
+      d.active.push({ ...row, key: 'dm' + (++d.seq), track, until: now + DM_LIFE * 1000 });
+      changed = true;
+    }
+    // 暂停时不清屏：弹幕停在原处更符合直觉（CSS 也会跟着暂停动画）
+    if (d.paused !== v.paused) { d.paused = v.paused; changed = true; }
+    if (!v.paused) {
+      const keep = d.active.filter(a => a.until > now);
+      if (keep.length !== d.active.length) { d.active = keep; changed = true; }
+    }
+    if (changed) m.redraw();
+  }, 200);
+}
+function stopDmTick() {
+  if (dmTimer) { clearInterval(dmTimer); dmTimer = null; }
+}
+
+// sendDanmaku 发弹幕：时间点取**当前播放位置** —— "边看边发"就该锚在这一刻。
+async function sendDanmaku() {
+  const d = state.dm;
+  if (!d || d.busy) return;
+  const text = (d.text || '').trim();
+  if (!text) return;
+  const v = document.querySelector('.playbox video');
+  const now = v ? v.currentTime * 1000 : 0;
+  d.busy = true;
+  m.redraw();
+  try {
+    const e = await api('/danmaku', {
+      method: 'POST',
+      body: { path: d.path, offset: Math.max(0, Math.round(now)), content: text },
+    });
+    d.text = '';
+    if (e && !d.rows.some(x => x.id === e.id)) {
+      d.rows.push(e);
+      d.rows.sort((a, b) => a.offset - b.offset);
+      // 自己发的立刻上屏（SSE 也会推回来一条，靠 id 去重）
+      d.active.push({ ...e, key: 'dm' + (++d.seq), track: d.seq % DM_TRACKS, until: now + DM_LIFE * 1000 });
+    }
+    say('弹幕已发送');
+  } catch (e) { say(e.message, true); }
+  d.busy = false;
+  m.redraw();
+}
+
+/* ── 评论（独立弹窗）────────────────────────────────────
+   入口是媒体条目上的「评论」按钮（在「编辑」之后）。填写框放在**最上面**，
+   列表按撰写时间**倒序**（最新在最上面）—— 与看帖习惯一致，进来先看到最新的。 */
+async function openComments(entry) {
+  const p = entry.path || joinPath(state.path, entry.name);
+  const c = {
+    path: p, name: stripNameExt(entry.name),
+    list: [], text: '', replyTo: '', busy: false, loading: true, es: null,
+  };
+  // 换了条目就先收掉上一条的流（同 openDanmaku 的道理）
+  if (state.cmt && state.cmt.es) { try { state.cmt.es.close(); } catch (_) { /* 已断开 */ } }
+  state.cmt = c;
+  m.redraw();
+  try {
+    const list = await api('/comments?path=' + encodeURIComponent(p));
+    if (state.cmt !== c) return;   // 关掉或换条目了，丢弃
+    c.list = list || [];
+  } catch (e) { say(e.message, true); }
+  c.loading = false;
+  m.redraw();
+  c.es = openEntryStream(p, e => {
+    if (state.cmt !== c || e.type !== 0) return;   // 评论弹窗只吃评论
+    if (mergeComment(c.list, e)) m.redraw();
+  });
+}
+
+function closeComments() {
+  if (state.cmt && state.cmt.es) { try { state.cmt.es.close(); } catch (_) { /* 已断开 */ } }
+  state.cmt = null;
+  m.redraw();
+}
+
+// sendComment 发评论；c.replyTo 非空时是回复某条评论（回复只支持一层）。
+async function sendComment() {
+  const c = state.cmt;
+  if (!c || c.busy) return;
+  const text = (c.text || '').trim();
+  if (!text) return;
+  c.busy = true;
+  m.redraw();
+  try {
+    const e = await api('/comments', {
+      method: 'POST',
+      body: { path: c.path, content: text, parent_id: c.replyTo || '' },
+    });
+    c.text = '';
+    c.replyTo = '';
+    mergeComment(c.list, e);   // 新评论会插到列表最前面
+    say('评论已发表');
+  } catch (e) { say(e.message, true); }
+  c.busy = false;
+  m.redraw();
+}
+
+// delComment 删除自己的评论（管理员能删任何人的，由服务端判定）。
+async function delComment(id) {
+  const c = state.cmt;
+  if (!c || c.busy) return;
+  if (!confirm('删除这条评论？')) return;
+  c.busy = true;
+  m.redraw();
+  try {
+    await api('/comments', { method: 'DELETE', body: { path: c.path, id } });
+    c.list = c.list.filter(t => t.id !== id);
+    c.list.forEach(t => { t.replies = (t.replies || []).filter(r => r.id !== id); });
+    if (c.replyTo === id) c.replyTo = '';
+    say('已删除');
+  } catch (e) { say(e.message, true); }
+  c.busy = false;
+  m.redraw();
+}
+
+// canDelete 我能不能删这条：自己的（uid 相同）或管理员。
+function canDelete(item) {
+  return state.isAdmin || (item.user_id && item.user_id === state.uid);
+}
+
+// fmtTime 弹幕时刻（毫秒）→ 便于阅读的时间轴位置。
+function fmtOffset(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60);
+  return m + ':' + String(s % 60).padStart(2, '0');
+}
+
+// fmtWhen 记录时间 → 相对"现在"的粗略说法。
+function fmtWhen(iso) {
+  const t = Date.parse(iso);
+  if (!isFinite(t)) return '';
+  const diff = (Date.now() - t) / 1000;
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前';
+  if (diff < 86400) return Math.floor(diff / 3600) + ' 小时前';
+  return new Date(t).toLocaleDateString();
+}
+
+// CommentItem 一条评论（顶层带它的回复）。作者昵称/头像直接用记录里的**快照**，
+// 不再查用户表 —— 用户后来改名换头像，历史评论仍显示当时的样子。
+function CommentItem(c, isReply) {
+  const cm = state.cmt;
+  return m('.cmt' + (isReply ? '.reply' : ''), { key: c.id }, [
+    m('img.cmt-av', { src: avatarURL(c.user_avatar), alt: c.user_name || '?', loading: 'lazy' }),
+    m('.cmt-main', [
+      m('.cmt-head', [
+        m('span.cmt-name', c.user_name || '匿名'),
+        m('span.cmt-meta', fmtWhen(c.created_at)),
+        m('.cmt-ops', [
+          !isReply ? m('button.link', {
+            onclick: () => { cm.replyTo = c.id; m.redraw(); },
+          }, '回复') : null,
+          canDelete(c) ? m('button.link', { onclick: () => guard(() => delComment(c.id)) }, '删除') : null,
+        ]),
+      ]),
+      m('.cmt-text', c.content),
+      !isReply && (c.replies || []).length
+        ? m('.cmt-replies', c.replies.map(r => CommentItem(r, true)))
+        : null,
+    ]),
+  ]);
+}
+
+// CommentModal 评论弹窗：**填写框在最上面**，下面是倒序的评论列表。
+// 用户要求"评论另外弄个按钮"（在编辑之后）、"按撰写时间倒序"、"最上面提供填写按钮"。
+//
+// 写成 `{view}` 对象而不是 `function`：`m(CommentModal)` 只认带 view 的组件，
+// 传函数会被当成 closure component（那要求返回 {view}），返回 vnode 就会在渲染时
+// 报 "Cannot read properties of undefined (reading 'apply')"。全项目的弹窗都是这个写法。
+const CommentModal = {
+  view() {
+  const c = state.cmt;
+  if (!c) return null;
+  const target = c.replyTo ? c.list.find(t => t.id === c.replyTo) : null;
+  const total = c.list.reduce((n, t) => n + 1 + (t.replies || []).length, 0);
+  return m('.overlay.scrim-edit', {
+    key: 'cmtmodal',
+    onclick: e => { if (e.target === e.currentTarget) closeComments(); },
+  }, m('.panel.cmt-panel', [
+    m('button.iconbtn.close-edit', { title: '关闭（Esc）', onclick: closeComments },
+      m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.close }))),
+    m('h2', [
+      '评论',
+      m('span.muted.tiny', { title: c.path }, `（${total}）${c.name}`),
+    ]),
+    // 填写框放最上面：进来就能写，不用先滚到列表底部
+    m('.cmt-form', [
+      target ? m('.cmt-chip', [
+        m('span', '回复 @' + (target.user_name || '匿名')),
+        m('button.link', { onclick: () => { c.replyTo = ''; m.redraw(); } }, '取消'),
+      ]) : null,
+      m('textarea', {
+        name: 'comment-content', id: 'fld-comment-content', rows: 3, maxlength: 500,
+        placeholder: target ? '回复…（Enter 发表，Shift+Enter 换行）' : '写评论…（Enter 发表，Shift+Enter 换行）',
+        value: c.text,
+        oninput: e => { c.text = e.target.value; },
+        onkeydown: e => {
+          if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); guard(sendComment); }
+        },
+      }),
+      m('button.btn', { disabled: c.busy || !(c.text || '').trim(), onclick: () => guard(sendComment) },
+        c.busy ? '发送中…' : '发表评论'),
+    ]),
+    c.loading
+      ? m('p.muted.tiny', '加载中…')
+      : (c.list.length
+          ? m('.cmt-list', c.list.map(t => CommentItem(t, false)))
+          : m('p.muted.tiny', '还没有评论，来说第一句')),
+  ]));
+  },
+};
+
 const VideoOverlay = {
   view() {
     const p = state.player;
     if (!p || p.kind !== 'video') return null;
+    const d = state.dm;
     return m('.overlay', { onclick: e => { if (e.target === e.currentTarget) closePlayer(); } },
-      m('.playbox', [
-        m('video', {
-          // 有旁路清单时不设 src，交给 hls.js 接管；否则直接用 Range 直链。
-          // key 用路径：换片时强制重建元素，否则 mithril 复用同一个 <video>，
-          // oncreate 不再触发，旧的 hls 实例会赖着不放。
-          key: p.path,
-          src: p.hls ? undefined : p.url,
-          controls: true, autoplay: true, playsinline: true,
-          // 续播：元数据就绪即跳到上次位置；关闭/卸载时再落一次，避免只靠 5 秒节流丢进度
-          oncreate: v => startVideo(v.dom, p),
-          onbeforeremove: v => { savePos(p.path, v.dom.currentTime); stopVideo(); },
-        }),
+      m('.playbox', { key: 'playbox' }, [
+        // 视频与弹幕层同属一个定位容器：弹幕要**盖在画面上**，而且不能挡住播放控件
+        m('.vwrap', { key: 'vwrap' }, [
+          m('video', {
+            // 有旁路清单时不设 src，交给 hls.js 接管；否则直接用 Range 直链。
+            // key 用路径：换片时强制重建元素，否则 mithril 复用同一个 <video>，
+            // oncreate 不再触发，旧的 hls 实例会赖着不放。
+            key: p.path,
+            src: p.hls ? undefined : p.url,
+            controls: true, autoplay: true, playsinline: true,
+            // 续播：元数据就绪即跳到上次位置；关闭/卸载时再落一次，避免只靠 5 秒节流丢进度
+            oncreate: v => startVideo(v.dom, p),
+            onbeforeremove: v => { savePos(p.path, v.dom.currentTime); stopVideo(); },
+          }),
+          d ? m('.dm-layer', {
+            key: 'dmlayer',
+            class: d.paused ? 'paused' : '',
+          }, d.active.map(a => m('span.dm', {
+            key: a.key,
+            style: { top: (a.track * (100 / DM_TRACKS)) + '%' },
+          }, a.content))) : null,
+        ]),
         // 与上面的 <video> 同属一个片段：mithril 要求片段内 vnode 要么全有 key、
         // 要么全没有，只给 video 加 key 会直接报「In fragments, vnodes must either
         // all have keys or none have keys」而整块渲染不出来。
@@ -1286,6 +1636,17 @@ const VideoOverlay = {
           m('button.iconbtn.solid', { title: '关闭（Esc）', onclick: closePlayer },
             m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.close }))),
         ]),
+        // 发弹幕：时间点由"当前播放位置"自动带上，所以这里只要一个输入框
+        d ? m('.dm-form', { key: 'dmform' }, [
+          m('input', {
+            type: 'text', maxlength: DM_LIMIT, autocomplete: 'off',
+            placeholder: `发一条弹幕…（Enter 发送，最多 ${DM_LIMIT} 字）`,
+            value: d.text,
+            oninput: e => { d.text = e.target.value; },
+            onkeydown: e => { if (e.key === 'Enter') { e.preventDefault(); guard(sendDanmaku); } },
+          }),
+          m('button.btn', { disabled: d.busy, onclick: () => guard(sendDanmaku) }, '发送'),
+        ]) : null,
       ]));
   },
 };
@@ -1542,6 +1903,7 @@ const App = {
       m(Lightbox),
       // 浮动层/弹窗叠在最外层：编辑弹窗在最上
       state.edit ? m(EditModal) : null,
+      state.cmt ? m(CommentModal) : null,
       state.toast
         ? m('p.toast', {
             class: state.toastErr ? 'err' : '',
@@ -1592,6 +1954,9 @@ async function init() {
       const me = await api('/me');
       // 角色 2 = 管理员（models.RoleAdmin）。据此给媒体条目右上角开编辑钮。
       state.isAdmin = me && me.role === 2;
+      state.uid = (me && me.id) || 0;
+      state.username = (me && me.username) || '';
+      state.avatar = (me && me.avatar) || '01';
     } catch { /* 令牌无效：api 已清掉 token，界面切到登录引导 */ }
   }
   m.redraw();

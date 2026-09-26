@@ -40,6 +40,7 @@ func SetupAPIRoutes(e *echo.Echo) {
 	authed.DELETE("/favorites", handlers.RemoveFavorite)
 	authed.POST("/comments", handlers.AddComment)
 	authed.DELETE("/comments", handlers.DeleteComment)
+	authed.POST("/danmaku", handlers.AddDanmaku)
 
 	// 管理员：挂载点与元数据维护
 	admin := api.Group("", middlewares.AdminMiddleware(secret))
@@ -81,6 +82,9 @@ func SetupAPIRoutes(e *echo.Echo) {
 	optional.POST("/fs/list", handlers.FsList)
 	optional.POST("/fs/get", handlers.FsGet)
 	optional.POST("/fs/info", handlers.FsInfo) // 悬浮层详情：sha1/海报/简介/元数据
+	// 弹幕实时推送（SSE）。放这组是因为 EventSource 只能把令牌塞在查询串里，
+	// 有就解析、没有按游客处理 —— 与"浏览态也能看弹幕"的只读口径一致。
+	optional.GET("/danmaku/stream", handlers.DanmakuStream)
 
 	// 海报图：<img> 加载，令牌走查询串，鉴权与取流同款（StreamAuth）
 	e.GET("/meta/poster", handlers.MetaPoster, middlewares.StreamAuth(secret, func() bool {

@@ -140,6 +140,9 @@ func (d *Local) Move(rel, dstDirRel string) error {
 
 func (d *Local) Close() error { return nil }
 
+// Identity 用元数据根的绝对路径：同一块盘指向同一个 .mocca，配置成别处也随之变化。
+func (d *Local) Identity() string { return filepath.Clean(d.MetaRoot) }
+
 // metaJoin 拼元数据根下的绝对路径。
 func (d *Local) metaJoin(rel string) string {
 	return filepath.Join(d.MetaRoot, relPath(rel))
@@ -179,6 +182,18 @@ func (d *Local) MetaCreate(rel string) (io.WriteCloser, error) {
 		return nil, errors.WithStack(err)
 	}
 	return os.Create(p)
+}
+
+func (d *Local) MetaAppend(rel string) (io.WriteCloser, error) {
+	p := d.metaJoin(rel)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return nil, errors.WithStack(err)
+	}
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	return f, nil
 }
 
 func (d *Local) MetaRemove(rel string) error {

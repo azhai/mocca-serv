@@ -267,17 +267,98 @@
   animation: overlayFade .22s ease;   /* 遮罩淡入 */
 }
 @keyframes overlayFade { from { opacity: 0; } to { opacity: 1; } }
+/* 播放框尽量铺满：宽 92vw、高 90vh（用户要求「占整个屏幕的 90% 左右」）。
+   高度是**被内容分掉的**：画面吃掉剩下的全部，工具条与发弹幕框只占它们需要的那点，
+   所以视频这边不再写死 max-height（写了就会在宽屏上留出一大片空白）。 */
 .playbox {
-  width: min(1080px, 100%); max-height: 100%;
+  width: min(92vw, calc(100vw - 32px)); height: 90vh;
   display: flex; flex-direction: column;
-  background: var(--md-surface-container-lowest); border-radius: 18px; overflow: hidden;
+  /* overflow 用 auto 而不是 hidden：内容一旦超过高度（比如很矮的窗口），
+     用 hidden 会把底部直接裁掉（还不是滚动，是彻底看不见）。圆角裁剪照旧。 */
+  background: var(--md-surface-container-lowest); border-radius: 18px; overflow: auto;
 }
-.playbox video { width: 100%; max-height: 76vh; background: #000; display: block; }
+/* 画面填满 vwrap，且**等比**（contain）：宽高比由视频自己定，多出来的地方留黑边，
+   绝不能拉伸 —— 拉伸在播放大屏上是最刺眼的问题。 */
+.playbox video {
+  width: 100%; height: 100%; max-height: none; object-fit: contain;
+  background: #000; display: block;
+}
 .playbox .pbar {
   display: flex; align-items: center; gap: 10px; padding: 10px 14px;
   font-size: 13px;
+  flex: none;   /* 窗口矮的时候让画面先缩，别把工具条挤扁 */
 }
 .playbox .pbar .pt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ── 弹幕：画面上的滚动文字 ─────────────────────────────
+   .vwrap 只做定位参照（弹幕要盖在视频上），高度由里面的 video 决定。 */
+/* flex:1 + min-height:0：把「工具条 + 发弹幕框」之外的高度全给画面。
+   min-height:0 是必须的 —— 否则 flex 子项不肯缩到内容高度以下，视频会把框撑破。 */
+.vwrap { flex: 1; min-height: 0; position: relative; line-height: 0; }
+/* 弹幕层：铺满画面但不吃鼠标事件 —— 否则播放控件的点击会被它拦掉。
+   底部留出 15%：那是浏览器播放控件的位置，弹幕盖上去会看不清进度条。 */
+.dm-layer {
+  position: absolute; inset: 0 0 15% 0; overflow: hidden; pointer-events: none; z-index: 2;
+  --dm-life: 8s;   /* 一条弹幕飞过的时长，改了要同步 home.js 的 DM_LIFE */
+}
+.dm-layer span.dm {
+  position: absolute; left: 100%; white-space: nowrap;
+  font-size: 18px; font-weight: 600; line-height: 1.4;
+  color: #fff; text-shadow: 0 1px 3px rgba(0, 0, 0, .9);
+  animation: dmFly var(--dm-life) linear forwards;
+  will-change: transform;
+}
+/* 暂停时弹幕也停住：画面都定格了，文字还在飞会显得很乱 */
+.dm-layer.paused span.dm { animation-play-state: paused; }
+@keyframes dmFly {
+  from { transform: translateX(0); }
+  to { transform: translateX(calc(-100vw - 100%)); }
+}
+
+.dm-form {
+  display: flex; gap: 8px; align-items: center; padding: 0 14px 10px;
+  flex: none;   /* 同上：发弹幕框不参与压缩 */
+}
+.dm-form input { flex: 1; min-width: 0; }
+
+/* ── 评论弹窗：填写框在最上面 + 倒序列表 + 一层回复 ───────
+   评论不放播放器里（用户要求）：看片时画面干净，评论是"看完再聊"。
+   尺寸（宽高）在「弹窗」那一段统一写，见 .overlay > .panel.cmt-panel。 */
+.cmt-panel h2 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 10px; }
+.cmt-panel h2 .tiny { font-weight: 400; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.cmt-form { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px;
+  padding-bottom: 12px; border-bottom: 1px solid var(--md-outline-variant); }
+.cmt-form textarea {
+  width: 100%; resize: vertical; font: inherit; padding: 8px 10px; border-radius: 10px;
+  border: 1px solid var(--md-outline-variant); background: var(--md-surface-container-low);
+  color: var(--md-on-surface);
+}
+.cmt-form .btn { align-self: flex-end; }
+.cmt-chip {
+  display: flex; align-items: center; gap: 8px; font-size: 12px;
+  color: var(--md-on-surface-variant);
+}
+/* 列表自己滚动（而不是让整个弹窗滚）：这样上面的填写框始终留在视野里。
+   flex:1 + min-height:0 让它吃掉弹窗余下的高度 —— 配合上面固定的 80vh 高度。 */
+.cmt-list { flex: 1; min-height: 0; max-height: none; overflow: auto;
+  display: flex; flex-direction: column; gap: 12px; }
+.cmt { display: flex; gap: 10px; }
+.cmt.reply { margin-left: 34px; }   /* 一层回复：缩进一跳，再深就没地方了 */
+.cmt-av { width: 28px; height: 28px; flex: none; border-radius: 50%; background: var(--md-surface-variant); }
+.cmt.reply .cmt-av { width: 22px; height: 22px; }
+.cmt-main { min-width: 0; flex: 1; }
+.cmt-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.cmt-name { font-size: 13px; font-weight: 600; }
+.cmt-meta { font-size: 11px; color: var(--md-on-surface-variant); }
+.cmt-ops { margin-left: auto; display: flex; gap: 8px; }
+.cmt-ops .link, .cmt-chip .link {
+  border: none; background: none; padding: 0; cursor: pointer; font-size: 12px;
+  color: var(--md-primary);
+}
+.cmt-text { font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; margin-top: 2px; }
+.cmt-replies { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; padding-left: 10px;
+  border-left: 2px solid var(--md-outline-variant); }
 
 /* 标题行里的前后 10 秒按钮：比全局按钮矮一截 */
 .playbox .pbar .btn {
@@ -351,6 +432,8 @@
 /* ── 编辑弹窗 ────────────────────────────────────────── */
 .overlay.scrim-edit { background: rgba(0, 0, 0, .5); z-index: 80; }
 .panel.edit-panel { max-width: 480px; width: 100%; max-height: 90vh; overflow: auto; position: relative; }
+
+.panel.edit-panel { max-width: 480px; width: 100%; max-height: 90vh; overflow: auto; position: relative; }
 /* 编辑弹窗右上角关闭按钮（浅色面板上用灰底，别沿深色遮罩那套白图标） */
 .panel.edit-panel .close-edit {
   position: absolute; top: 10px; right: 10px; z-index: 2;
@@ -386,6 +469,19 @@
 
 /* 编辑弹窗（非登录窄卡）：保持中等宽度、内容过长可滚动 */
 .overlay > .panel:not(.narrow) { width: min(480px, 92vw); max-height: 90vh; overflow: auto; }
+
+/* 评论弹窗比通用弹窗大一截（用户要求：宽 1.5 倍、高 2 倍）。
+   - 宽：通用弹窗是 min(480px, 92vw) → 这里 min(720px, 92vw)，正好 1.5 倍；
+   - 高：通用弹窗是**被内容撑出来的**（评论少就很矮，大约 40vh 上下），这里给一个
+     确定的高度 80vh，约等于原来的两倍，也不再随评论条数忽高忽低。
+   固定高度 + 纵向 flex：写评论那块钉在上面，列表吃掉剩余高度并自己滚动。
+
+   两条都要注意：选择器写全 `.overlay > .panel.cmt-panel`（与上面 :not(.narrow) 同优先级），
+   并且**必须放在它后面** —— 只写 `.panel.cmt-panel` 或写在前面，宽高都会被它盖掉。 */
+.overlay > .panel.cmt-panel {
+  width: min(720px, 92vw); height: 80vh; max-height: 90vh;
+  display: flex; flex-direction: column; overflow: hidden;
+}
 
 /* 封面区：封面图在上，上传与截图并排一行在下 */
 .cover { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
