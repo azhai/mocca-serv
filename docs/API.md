@@ -1,13 +1,14 @@
 # Mocca 后端 API 参考
 
-本文与代码同步：所有端点都来自 `routes/routes.go`，字段来自各 handler 的请求/响应结构体。
+本文与代码同步：端点来自 `routes/routes.go`（两种构建共用）与 `routes/admin.go`（仅完整版），
+字段来自各 handler 的请求/响应结构体。
 **只列出实际存在的接口**——早期版本里那些「规划中的接口」（`/api/public/info`、任务队列、扫描、
 设置、驱动列表、`/p` 代理取流、`sign=` 签名直链等）在本服务中并不存在，已删除。
 
-> **两种构建共用这一套 API**：完整版（`make full`）额外带管理后台 `/admin/`；
-> 纯 API 版（`make api`，`-tags noweb`）把后台整体剥离。
-> 两者的路由表一致，唯一差别是 `POST /api/meta/cover`（封面图制作）
-> 在纯 API 版里返回 `code: 404` 并说明原因。详见 [`BACKEND.md` §5](./BACKEND.md#5-两种构建完整版与纯-api-版)。
+> **两种构建共用这一套 API 定义，但接口集合不同**：完整版（`make full`）额外带管理后台
+> `/admin/` 与整组管理接口（第 9 节、以及第 4.4 节起的写操作）；纯 API 版（`make api`，
+> `-tags noweb`）只保留 APP 用得到的接口 —— 管理后台页面与整组管理路由都不注册，
+> 请求落到默认 `404`（不是 `code: 404` 信封）。详见 [`BACKEND.md` §5](./BACKEND.md#5-两种构建完整版与纯-api-版)。
 
 - [1. 通用约定](#1-通用约定)
 - [2. 认证与账号](#2-认证与账号)
@@ -74,7 +75,7 @@ http://<host>:8000/static/...  静态资源（头像）
 | 公开 | 无 | 任何人可调 |
 | `optional` | `OptionalAuth` | 带令牌就按该用户处理，不带按游客；游客开关关掉后返回 401 |
 | `authed` | `AuthMiddleware` | 必须带有效 JWT，否则 `code: 401` |
-| `admin` | `AdminMiddleware` | 必须登录**且**是管理员，否则 `401` / `403` |
+| `admin` | `AdminMiddleware` | 必须登录**且**是管理员，否则 `401` / `403`；整组只在完整版注册 |
 
 ---
 
@@ -266,7 +267,7 @@ curl -s http://127.0.0.1:8000/api/ping      # pong
 
 **列表过滤规则**（只影响列表，按显式路径取流不受影响）：
 
-1. 名字以 `.` 开头 —— 隐藏文件/目录，含 `.DS_Store`、`._xxx`、`.git`，以及本服务自己的 `.mocca`（封面/缩略图目录）；
+1. 名字以 `.` 开头 —— 隐藏文件/目录，含 `.DS_Store`、`._xxx`、`.git`，以及本服务自己的 `.mocca`（设备侧元数据根：封面、简介、索引）；
 2. 命中系统保留名（不区分大小写）：`$RECYCLE.BIN`、`System Volume Information`、`RECYCLER`、
    `Thumbs.db`、`ehthumbs.db`、`desktop.ini`、`lost+found`、`found.000`、`hiberfil.sys`、
    `pagefile.sys`、`swapfile.sys`、`Network Trash Folder`、`Temporary Items`。
@@ -291,7 +292,7 @@ curl -s http://127.0.0.1:8000/api/ping      # pong
     "hls_url": "/d/media/.hls/demo.mp4/index.m3u8?token=eyJhbGciOi...",
     "header": "", "provider": "Local",
     "title": "演示片", "duration": 7325000,
-    "cover": ".mocca/covers/demo.png", "description": "简介", "authors": ["甲", "乙"]
+    "cover": "ab/cd/ef0123….png", "summary": "简介", "authors": ["甲", "乙"]
   }
 }
 ```
@@ -302,7 +303,8 @@ curl -s http://127.0.0.1:8000/api/ping      # pong
 | `hls_url` | 旁路 HLS 清单地址，**仅当同目录 `.hls/<文件名>/index.m3u8` 存在时才有**。客户端应优先用它（弱网下按分片续拉），取不到再回落到 `raw_url` 的 Range 直链 |
 | `provider` | 当前只有 `Local` 与 `SMB`（由存储的 `driver` 决定） |
 | `header` | 恒为空字符串（APP 会解析该字段，故保留） |
-| `title` / `duration` / `cover` / `description` / `authors` | 有元数据时才出现（`omitempty`） |
+| `title` / `duration` / `cover` / `summary` / `authors` | 有元数据时才出现（`omitempty`） |
+| `cover` | 封面**相对 `meta_dir` 的路径**（形如 `ab/cd/<sha1 余下部分>.png`），统一是 400×300 的高压缩 PNG。要显示请用 `/meta/poster?path=`，不要客户端拼这个路径 |
 
 ### 4.3 类型枚举
 
@@ -626,7 +628,7 @@ sha1 来自媒体文件内容，记在同目录的 `.index.jsonl`（`mocca index
 | `/api/favorites` | DELETE | `{ "path": "/media/a.mp4" }` | 取消收藏（按路径匹配） |
 
 收藏对象：`{ "id": 1, "user_id": 1, "path": "/media/a.mp4", "name": "a.mp4", "kind": 2, "thumb": "", "created_at": "..." }`
-（`thumb` 存的是相对路径口径，见 `models.ThumbRelPath`；本服务不生成缩略图。）
+（`thumb` 由客户端提交；本服务不生成缩略图，实际恒为空。）
 
 ### 评论与弹幕（读取公开，写入需登录）
 
@@ -676,6 +678,8 @@ sha1 来自媒体文件内容，记在同目录的 `.index.jsonl`（`mocca index
 ---
 
 ## 9. 存储、用户与全局选项（管理员）
+
+本节全部端点属于 `admin` 组，**只在完整版存在**：纯 API 版里整组不注册，请求是 HTTP `404`。
 
 ### 存储
 

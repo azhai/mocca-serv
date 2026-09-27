@@ -38,6 +38,8 @@ const I = {
   edit: 'M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z',
   // 对话气泡：评论入口（与编辑的笔分开，别让人误点是编辑）
   comment: 'M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z',
+  // 弹幕开关：字幕样式（整条横带 + 两条短杠），一眼认出是"屏上飘的字"
+  dm: 'M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zM4 12h4v2H4v-2zm10 6H4v-2h10v2zm6 0h-4v-2h4v2zm0-4H10v-2h10v2z',
 };
 
 // 媒体类型，取值与 models/media.go 的 MediaKind 一一对应
@@ -74,6 +76,9 @@ const state = {
   cmt: null,       // 评论弹窗态（见 openComments）：{ path, name, list, text, replyTo, ... }
   edit: null,      // 编辑弹窗 { path, name, summary, director, cast, year, region, studio, loading }
   urlOf: new Map(), // 路径 → 可直接播放/预览的地址（服务端 raw_url 口径）
+  // 弹幕开关（播放器标题行上的按钮）。记住选择：看片时想不想被弹幕打扰是稳定的偏好，
+  // 不该每开一个片子重设一次。默认开（弹幕是本服务的主打功能之一）。
+  dmOn: localStorage.getItem('mocca_dm') !== '0',
 };
 
 // coverRev 封面版本号：封面一经更改（上传/截图）就自增，拼进海报 URL 破缓存，
@@ -1289,6 +1294,33 @@ function startVideo(el, p) {
 const DM_LIMIT = 50;    // 与后端 mediaindex.MaxDanmakuLength 对齐
 const DM_TRACKS = 6;    // 同屏轨道数：再多就挤成一片，再少会互相压住
 const DM_LIFE = 8;      // 一条弹幕飞过屏幕的秒数（CSS 的 --dm-life 必须与它一致）
+const DM_CLEAR = 2;     // 秒：上一条飞出右侧入口、这条轨道算「让开」的时间
+
+// nextTrack 挑一条上屏轨道：**从上往下**找第一条让开的，全忙时挑最久没用的。
+//
+// 别用 `seq % DM_TRACKS` 轮转：那只飘着一条弹幕时，下一条也会被排到中间
+// 偏上的轨道去 —— 看起来就是「弹幕没出现在最上面」。而且 seq 的自增时机
+// 两处写法不一致（发弹幕那条是先自增再取模），起点还差一格。
+//
+// nowMs 用**视频时间**（毫秒）：active 里的 until 就是按它算的，同一把尺子才比得了。
+function nextTrack(d, nowMs) {
+  const born = new Map();   // 轨道 → 该轨最近一条弹幕的上屏时刻
+  for (const a of d.active) {
+    const at = a.until - DM_LIFE * 1000;
+    const prev = born.get(a.track);
+    if (prev === undefined || at > prev) born.set(a.track, at);
+  }
+  for (let t = 0; t < DM_TRACKS; t++) {
+    const at = born.get(t);
+    if (at === undefined || nowMs - at >= DM_CLEAR * 1000) return t;
+  }
+  // 全满（弹幕很密）：用最久没用的那条，尽量不压住刚上去的
+  let lru = 0;
+  for (let t = 1; t < DM_TRACKS; t++) {
+    if (born.get(t) < born.get(lru)) lru = t;
+  }
+  return lru;
+}
 
 const avatarURL = key => '/static/avatars/' + (key || '01') + '.png';
 
@@ -1381,12 +1413,17 @@ function startDmTick() {
     d.last = now;
     // 往前跳到没看过的位置：跳过那些"已经过去"的弹幕，不补放（补放等于一次刷屏）
     while (d.cursor < d.rows.length && d.rows[d.cursor].offset < now - 1000) d.cursor++;
-    // 已经到点的弹幕放上屏
-    while (d.cursor < d.rows.length && d.rows[d.cursor].offset <= now + 250) {
-      const row = d.rows[d.cursor++];
-      const track = d.seq % DM_TRACKS;
-      d.active.push({ ...row, key: 'dm' + (++d.seq), track, until: now + DM_LIFE * 1000 });
-      changed = true;
+    if (state.dmOn) {
+      // 已经到点的弹幕放上屏
+      while (d.cursor < d.rows.length && d.rows[d.cursor].offset <= now + 250) {
+        const row = d.rows[d.cursor++];
+        d.active.push({ ...row, key: 'dm' + (++d.seq), track: nextTrack(d, now), until: now + DM_LIFE * 1000 });
+        changed = true;
+      }
+    } else if (d.active.length) {
+      // 关着的时候清空在飘的：否则重新打开会看到一堆"穿越"过来的旧弹幕。
+      // 游标上面照常推进，所以重新打开是从当前时刻接着放，不是补放。
+      d.active = []; changed = true;
     }
     // 暂停时不清屏：弹幕停在原处更符合直觉（CSS 也会跟着暂停动画）
     if (d.paused !== v.paused) { d.paused = v.paused; changed = true; }
@@ -1399,6 +1436,17 @@ function startDmTick() {
 }
 function stopDmTick() {
   if (dmTimer) { clearInterval(dmTimer); dmTimer = null; }
+}
+
+// toggleDm 弹幕开关（播放器标题行上的按钮）。
+//
+// 只影响「上屏」：SSE 订阅不断、已收下的弹幕不丢，所以关掉再打开能立刻接着放。
+// 关掉的那一刻把在飘的清掉，打开时由 tick 从当前播放位置接着走 —— 不补放旧弹幕。
+function toggleDm() {
+  state.dmOn = !state.dmOn;
+  localStorage.setItem('mocca_dm', state.dmOn ? '1' : '0');
+  if (!state.dmOn && state.dm) state.dm.active = [];
+  m.redraw();
 }
 
 // sendDanmaku 发弹幕：时间点取**当前播放位置** —— "边看边发"就该锚在这一刻。
@@ -1421,7 +1469,7 @@ async function sendDanmaku() {
       d.rows.push(e);
       d.rows.sort((a, b) => a.offset - b.offset);
       // 自己发的立刻上屏（SSE 也会推回来一条，靠 id 去重）
-      d.active.push({ ...e, key: 'dm' + (++d.seq), track: d.seq % DM_TRACKS, until: now + DM_LIFE * 1000 });
+      d.active.push({ ...e, key: 'dm' + (++d.seq), track: nextTrack(d, now), until: now + DM_LIFE * 1000 });
     }
     say('弹幕已发送');
   } catch (e) { say(e.message, true); }
@@ -1618,20 +1666,31 @@ const VideoOverlay = {
             oncreate: v => startVideo(v.dom, p),
             onbeforeremove: v => { savePos(p.path, v.dom.currentTime); stopVideo(); },
           }),
-          d ? m('.dm-layer', {
+          d && state.dmOn ? m('.dm-layer', {
             key: 'dmlayer',
             class: d.paused ? 'paused' : '',
           }, d.active.map(a => m('span.dm', {
             key: a.key,
             style: { top: (a.track * (100 / DM_TRACKS)) + '%' },
           }, a.content))) : null,
-        ]),
+        ].filter(Boolean)),
         // 与上面的 <video> 同属一个片段：mithril 要求片段内 vnode 要么全有 key、
         // 要么全没有，只给 video 加 key 会直接报「In fragments, vnodes must either
-        // all have keys or none have keys」而整块渲染不出来。
+        // all have keys or none have keys」而整块渲染不出来。条件分支留下的 null
+        // 也算一个「不带 key 的位置」，所以数组都 `.filter(Boolean)` 把洞去掉，
+        // 保证有内容时每个位置都带 key。
         m('.pbar', { key: 'pbar' }, [
           m('button.btn.ghost', { title: '后退 10 秒', onclick: () => seekVid(-10) }, '-10s'),
           m('button.btn.ghost', { title: '前进 10 秒', onclick: () => seekVid(10) }, '+10s'),
+          // 弹幕开关：带图标，关掉时整颗按钮变灰（.off），一眼能看出当前状态
+          m('button.btn.ghost.dm-toggle', {
+            class: state.dmOn ? '' : 'off',
+            title: state.dmOn ? '关闭弹幕' : '打开弹幕',
+            onclick: toggleDm,
+          }, [
+            m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.dm })),
+            m('span', state.dmOn ? '弹幕' : '弹幕关'),
+          ]),
           m('span.pt', { title: p.name }, p.name),
           m('button.iconbtn.solid', { title: '关闭（Esc）', onclick: closePlayer },
             m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.close }))),
@@ -1647,7 +1706,7 @@ const VideoOverlay = {
           }),
           m('button.btn', { disabled: d.busy, onclick: () => guard(sendDanmaku) }, '发送'),
         ]) : null,
-      ]));
+      ].filter(Boolean)));
   },
 };
 

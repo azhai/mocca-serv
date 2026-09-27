@@ -26,10 +26,10 @@ Ein Quellbaum, zwei Binärdateien. Der einzige Unterschied ist ein Build-Tag.
 | --- | --- | --- |
 | Build | `make full` (oder `go build ./`) | `make api` (oder `go build -tags noweb ./`) |
 | Ergebnis | `bin/mocca` | `bin/mocca-api` |
-| REST-API + Streaming | ja | ja (identische Routen) |
+| REST-API + Streaming | ja | ja (die App-Routen sind identisch) |
 | `passwd`-Kommando | ja | ja |
 | Verwaltungskonsole `/admin/` | ja (eingebaut) | **nein** —— `web/public/` wird nicht kompiliert |
-| Cover-Generator | ja | **nein** —— der Handler antwortet nur „in diesem Build nicht enthalten" |
+| Admin-Endpunkte (Speicher, Upload, Bearbeiten, Cover/Screenshot, Einstellungen, Benutzer) | ja | **nein** —— die ganze Gruppe wird nicht registriert (HTTP 404) |
 
 ## Schnellstart
 
@@ -57,7 +57,7 @@ Systemumgebungsvariablen mit dem Präfix `MOCCA_`. Rangfolge: eingebaute Standar
 | `.env`-Schlüssel | Umgebungsvariable | Standard | Bedeutung |
 | --- | --- | --- | --- |
 | `ADDR` | `MOCCA_ADDR` | `:8000` | Listen-Adresse |
-| `DATA_DIR` | `MOCCA_DATA_DIR` | `data` | Datenverzeichnis: Datenbank, Cover und Vorschaubilder liegen hier |
+| `DATA_DIR` | `MOCCA_DATA_DIR` | `data` | Hier liegt die Datenbank; Cover und Indexdateien liegen geräteseitig neben den Medien |
 | `JWT_SECRET` | `MOCCA_JWT_SECRET` | `mocca-dev-secret` | Signaturschlüssel für Tokens —— im Produktivbetrieb ändern |
 | `ADMIN_PASSWORD` | `MOCCA_ADMIN_PASSWORD` | `@Mocca/1` | Passwort des ersten Administrators, nur wenn noch keiner existiert |
 
@@ -66,7 +66,7 @@ Systemumgebungsvariablen mit dem Präfix `MOCCA_`. Rangfolge: eingebaute Standar
 - **Speicher** —— lokale Ordner und SMB-(Samba-)Freigaben einbinden; beliebig viele Mount-Punkte.
 - **Byte-Range-Streaming** —— `GET /d/<pfad>` beherrscht `Range`, mehrere Bereiche, `HEAD` und bedingte Requests; Player können spulen und fortsetzen.
 - **Medien-Metadaten** —— Titel, Dauer, Cover, Beschreibung und mehrere Autoren pro Eintrag; Arten: Video / Audio / Bild.
-- **Cover-Generator** —— die Verwaltungskonsole zeichnet ein 1280×720-Cover auf einem Canvas und legt es unter `<datenverzeichnis>/.mocca/covers/` ab (nur vollständiger Build).
+- **Cover-Generator** (nur vollständiger Build) —— ein Cover kommt aus einem Admin-Upload oder aus einem ffmpeg-Frame zu einem gewählten Zeitpunkt (`/api/fs/shot` für eine Datei, `/api/fs/patch` für einen ganzen Ordner); es wird auf 400×300 PNG skaliert und **geräteseitig** neben der Mediathek unter `<Speicherwurzel>/.mocca/ab/cd/<Rest-der-sha1>.png` abgelegt.
 - **Verwaltungskonsole** (nur vollständiger Build) —— eingebaut, funktioniert offline: Speicher, Benutzer, Metadaten, Ordner-Passwörter und Massen-Upload mit eigenem Fortschrittsbalken je Datei.
 - **Konten & Rechte** —— Administrator / Benutzer / Gast; ein Benutzer sieht ausschließlich sein eigenes `base_path`; 12 vorgegebene Avatare (Bild-Upload wird bewusst nicht unterstützt).
 - **Ordner-Passwörter** —— einmal beim übergeordneten Ordner gesetzt, verlangt der gesamte Teilbaum (inklusive Streaming) das Passwort; gespeichert als bcrypt.

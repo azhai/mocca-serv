@@ -8,10 +8,15 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
-// SetupAPIRoutes 注册全部接口。
+// SetupAPIRoutes 注册接口。
 //
 // 分组即鉴权策略，一眼能看出每个接口的权限要求：
 // admin（管理员）> authed（需登录）> optional（登录可选）> api（公开）。
+//
+// 这里只注册**两种构建都要**的那部分（APP 与浏览器浏览端共用）。
+// 管理类接口（存储维护、上传改名、媒体编辑、封面制作、刮削、全局设置、用户管理）
+// 单独放在 SetupAdminRoutes 里，由 AdminRoutes 决定要不要挂：
+// 完整版挂全套，纯 API 版（-tags noweb）一个不挂 —— 见 admin.go 与 build_*.go。
 func SetupAPIRoutes(e *echo.Echo) {
 	secret := config.Cfg.JWTSecret
 
@@ -42,40 +47,8 @@ func SetupAPIRoutes(e *echo.Echo) {
 	authed.DELETE("/comments", handlers.DeleteComment)
 	authed.POST("/danmaku", handlers.AddDanmaku)
 
-	// 管理员：挂载点与元数据维护
-	admin := api.Group("", middlewares.AdminMiddleware(secret))
-	admin.GET("/storage/list", handlers.ListStorage)
-	admin.POST("/storage/create", handlers.CreateStorage)
-	admin.POST("/storage/update", handlers.UpdateStorage)
-	admin.POST("/storage/delete", handlers.DeleteStorage)
-	admin.GET("/storage/scan", handlers.ScanMounts) // 自动发现外接设备根目录（管理员）
-	// 上传：批量与单文件各一个入口，前端按文件并发调用单文件接口拿独立进度
-	admin.POST("/fs/upload", handlers.Upload)
-	admin.POST("/fs/put", handlers.UploadOne)
-	admin.POST("/fs/remove", handlers.FsRemove)
-	admin.POST("/fs/rename", handlers.FsRename)
-	admin.POST("/fs/move", handlers.FsMove)
-	admin.POST("/fs/edit", handlers.FsEdit)       // 媒体条目编辑：改名 + 附加信息
-	admin.POST("/fs/cov", handlers.FsCov)         // 上传替换音/视频封面
-	admin.POST("/fs/shot", handlers.FsShot)       // FFmpeg 指定秒数截图作视频封面
-	admin.POST("/fs/hls", handlers.FsHLS)         // 切分旁路 HLS：.hls/<文件名>/（只切不转）
-	admin.POST("/fs/reindex", handlers.FsReindex) // 按增量重建索引：比 size+modified，变了才重算 sha1
-	admin.POST("/fs/uncov", handlers.FsUncov)     // 删除封面（与上传封面/FFmpeg 截图相对）
-	admin.POST("/fs/patch", handlers.FsPatch)     // 目录级补充截图：给缺封面的视频批量生封面
-	// TMDB 刮削：先检索候选，再把选中的那条写进 .mocca 附加信息与封面
-	admin.POST("/fs/scrape", handlers.ScrapeSearch)
-	admin.POST("/fs/scrape/apply", handlers.ScrapeApply)
-	// 目录密码：给父目录设一次即可保护整棵子树
-	admin.POST("/folder/password", handlers.SetFolderPassword)
+	// 目录密码状态：客户端据此决定要不要弹口令框（只读，两种构建都要）
 	api.GET("/folder/status", handlers.FolderPasswordStatus)
-	// 全局选项：后台开关（是否开放注册、游客可浏览、文件监控等）
-	admin.GET("/setting/list", handlers.ListSettings)
-	admin.POST("/setting/update", handlers.UpdateSetting)
-	// 用户管理
-	admin.GET("/user/list", handlers.ListUsers)
-	admin.POST("/user/create", handlers.CreateUserByAdmin)
-	admin.POST("/user/update", handlers.UpdateUserByAdmin)
-	admin.POST("/user/delete", handlers.DeleteUserByAdmin)
 
 	// 登录可选：未登录按游客权限列目录
 	optional := api.Group("", middlewares.OptionalAuth(secret))
@@ -95,4 +68,9 @@ func SetupAPIRoutes(e *echo.Echo) {
 	e.GET("/d/*path", handlers.Download, middlewares.StreamAuth(secret, func() bool {
 		return models.SettingBool(handlers.SettingAllowGuest, true)
 	}))
+
+	// 管理类接口：纯 API 构建（-tags noweb）里不注册，整组不存在
+	if AdminRoutes {
+		SetupAdminRoutes(e)
+	}
 }

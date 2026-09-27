@@ -278,13 +278,6 @@ a.browse-link {
 }
 a.browse-link:hover { background: var(--md-outline-hover); }
 
-/* 封面图画布：画布内部分辨率固定在 1280×720（落盘尺寸），
-   这里只做等比缩放，小屏上也能整块看见。 */
-.cover-canvas {
-  display: block; width: 100%; height: auto; margin-bottom: 16px;
-  border: 1px solid var(--md-outline-variant); border-radius: 12px;
-  background: var(--md-surface-variant);
-}
 /* 背景图选择框：跟其它 label 一样占满一行，但别把文件按钮撑到整行宽 */
 .form-section input[type=file] { margin-top: 6px; font-size: 13px; }
 

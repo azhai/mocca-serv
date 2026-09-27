@@ -141,7 +141,11 @@ func hlsArgs(in, outDir string) []string {
 // runFFmpegCmd 跑一次 ffmpeg，把 stderr 收进错误信息（与 FFmpegShot 同一套口径）。
 // what 只用于拼错误前缀，如「切分」「截图」。
 func runFFmpegCmd(what string, args []string, stdin io.Reader) error {
-	cmd := exec.Command("ffmpeg", args...)
+	bin, err := ffmpegBin()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(bin, args...)
 	cmd.Stdin = stdin
 	var log bytes.Buffer
 	cmd.Stderr = &log

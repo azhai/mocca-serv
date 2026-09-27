@@ -26,10 +26,10 @@ Eén broncodeboom, twee binaries. Het enige verschil is een build-tag.
 | --- | --- | --- |
 | Build | `make full` (of `go build ./`) | `make api` (of `go build -tags noweb ./`) |
 | Resultaat | `bin/mocca` | `bin/mocca-api` |
-| REST-API + streaming | ja | ja (identieke routes) |
+| REST-API + streaming | ja | ja (de app-routes zijn identiek) |
 | `passwd`-commando | ja | ja |
 | Beheerconsole `/admin/` | ja (ingebouwd) | **nee** —— `web/public/` wordt niet meegecompileerd |
-| Covergenerator | ja | **nee** —— de handler antwoordt alleen "niet in deze build" |
+| Beheer-endpoints (opslag, upload, bewerken, cover/screenshot, instellingen, gebruikers) | ja | **nee** —— de hele groep wordt niet geregistreerd (HTTP 404) |
 
 ## Snelstart
 
@@ -57,7 +57,7 @@ systeemomgevingsvariabelen met het voorvoegsel `MOCCA_`. Volgorde: ingebouwde st
 | `.env`-sleutel | Omgevingsvariabele | Standaard | Betekenis |
 | --- | --- | --- | --- |
 | `ADDR` | `MOCCA_ADDR` | `:8000` | Luisteradres |
-| `DATA_DIR` | `MOCCA_DATA_DIR` | `data` | Datamap: database, covers en miniaturen staan hier |
+| `DATA_DIR` | `MOCCA_DATA_DIR` | `data` | Hier staat de database; covers en indexbestanden staan apparaatzijde naast je media |
 | `JWT_SECRET` | `MOCCA_JWT_SECRET` | `mocca-dev-secret` | Signatuursleutel voor tokens —— wijzig deze in productie |
 | `ADMIN_PASSWORD` | `MOCCA_ADMIN_PASSWORD` | `@Mocca/1` | Wachtwoord van de eerste beheerder, alleen als er nog geen beheerder is |
 
@@ -66,7 +66,7 @@ systeemomgevingsvariabelen met het voorvoegsel `MOCCA_`. Volgorde: ingebouwde st
 - **Opslag** —— koppel lokale mappen en SMB-(Samba-)shares; onbeperkt aantal mountpunten.
 - **Byte-range-streaming** —— `GET /d/<pad>` ondersteunt `Range`, meerdere bereiken, `HEAD` en conditionele requests, dus spelers kunnen spoelen en hervatten.
 - **Media-metadata** —— titel, duur, cover, omschrijving en meerdere auteurs per item; soorten: video / audio / afbeelding.
-- **Covergenerator** —— de beheerconsole tekent een cover van 1280×720 op een canvas en bewaart die onder `<datamap>/.mocca/covers/` (alleen volledige build).
+- **Covergenerator** (alleen volledige build) —— een cover komt van een admin-upload of een ffmpeg-frame op een gekozen tijdstip (`/api/fs/shot` voor één bestand, `/api/fs/patch` voor een hele map); die wordt naar 400×300 PNG geschaald en **apparaatzijde** naast de mediatheek bewaard onder `<opslagroot>/.mocca/ab/cd/<rest-van-sha1>.png`.
 - **Beheerconsole** (alleen volledige build) —— ingebouwd, werkt offline: opslag, gebruikers, metadata, mapwachtwoorden en bulk-upload met een eigen voortgangsbalk per bestand.
 - **Accounts & rechten** —— beheerder / gebruiker / gast; een gebruiker ziet uitsluitend het eigen `base_path`; 12 vooraf ingestelde avatars (afbeeldingen uploaden wordt bewust niet ondersteund).
 - **Mapwachtwoorden** —— één keer instellen op een bovenliggende map en de hele substructuur (inclusief streaming) vraagt erom; opgeslagen als bcrypt.

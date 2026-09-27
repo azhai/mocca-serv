@@ -26,10 +26,10 @@ Une seule base de code, deux binaires. La seule différence est un tag de compil
 | --- | --- | --- |
 | Compilation | `make full` (ou `go build ./`) | `make api` (ou `go build -tags noweb ./`) |
 | Résultat | `bin/mocca` | `bin/mocca-api` |
-| API REST + streaming | oui | oui (routes identiques) |
+| API REST + streaming | oui | oui (les routes de l'app sont identiques) |
 | Commande `passwd` | oui | oui |
 | Console d'administration `/admin/` | oui (intégrée) | **non** —— `web/public/` n'est pas compilé |
-| Générateur de couvertures | oui | **non** —— le handler répond seulement « absent de cette compilation » |
+| Endpoints d'administration (stockage, envoi, édition, couverture/capture, réglages, utilisateurs) | oui | **non** —— tout le groupe n'est pas enregistré (HTTP 404) |
 
 ## Démarrage rapide
 
@@ -57,7 +57,7 @@ les variables d'environnement préfixées par `MOCCA_`. Priorité : valeurs par 
 | Clé `.env` | Variable d'environnement | Défaut | Signification |
 | --- | --- | --- | --- |
 | `ADDR` | `MOCCA_ADDR` | `:8000` | Adresse d'écoute |
-| `DATA_DIR` | `MOCCA_DATA_DIR` | `data` | Répertoire de données : base, couvertures et vignettes |
+| `DATA_DIR` | `MOCCA_DATA_DIR` | `data` | La base de données est ici ; les couvertures et les index restent côté appareil, à côté des médias |
 | `JWT_SECRET` | `MOCCA_JWT_SECRET` | `mocca-dev-secret` | Clé de signature des jetons —— à changer en production |
 | `ADMIN_PASSWORD` | `MOCCA_ADMIN_PASSWORD` | `@Mocca/1` | Mot de passe du premier administrateur, uniquement s'il n'en existe aucun |
 
@@ -65,8 +65,8 @@ les variables d'environnement préfixées par `MOCCA_`. Priorité : valeurs par 
 
 - **Stockages** —— montez des dossiers locaux et des partages SMB (Samba) ; autant de points de montage que voulu.
 - **Streaming par plages d'octets** —— `GET /d/<chemin>` gère `Range`, les plages multiples, `HEAD` et les requêtes conditionnelles : les lecteurs peuvent se déplacer et reprendre.
-- **Métadonnées média** —— titre, durée, couverture, description et plusieurs auteurs par élément ; types vidéo / audio / image.
-- **Générateur de couvertures** —— la console dessine une couverture 1280×720 sur un canvas et l'enregistre dans `<répertoire-de-données>/.mocca/covers/` (compilation complète uniquement).
+- **Métadonnées média** —— titre, durée, couverture, résumé et plusieurs auteurs par élément ; types vidéo / audio / image.
+- **Générateur de couvertures** (compilation complète uniquement) —— une couverture vient d'un envoi par l'admin ou d'une image ffmpeg à l'instant choisi (`/api/fs/shot` pour un fichier, `/api/fs/patch` pour tout un dossier) ; elle est redimensionnée en PNG 400×300 et stockée **côté appareil**, à côté de la médiathèque, sous `<racine-du-stockage>/.mocca/ab/cd/<reste-du-sha1>.png`.
 - **Console d'administration** (compilation complète uniquement) —— intégrée, fonctionne hors ligne : stockages, utilisateurs, métadonnées, mots de passe de dossiers et envoi par lots avec une barre de progression par fichier.
 - **Comptes & permissions** —— administrateur / utilisateur / invité ; un utilisateur ne voit que son propre `base_path` ; 12 avatars prédéfinis (l'envoi d'images n'est volontairement pas pris en charge).
 - **Mots de passe de dossiers** —— défini une fois sur un dossier parent, tout le sous-arbre (streaming compris) l'exige ; stocké en bcrypt.

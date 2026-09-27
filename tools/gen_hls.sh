@@ -40,7 +40,19 @@ while getopts "ft:h" opt; do
 done
 shift $((OPTIND - 1))
 
-command -v ffmpeg >/dev/null 2>&1 || { echo "未找到 ffmpeg，请先安装并加入 PATH" >&2; exit 1; }
+# 先按 PATH 找；找不到再回退到已知安装位置（与服务的 ffmpegBin 同一套兜底，
+# 服务被 launchd 类守护进程以极简 PATH 拉起时 /usr/local/bin 也不在 PATH 里）。
+FFMPEG=$(command -v ffmpeg 2>/dev/null || true)
+if [ -z "$FFMPEG" ]; then
+  for c in /usr/local/bin/ffmpeg /opt/homebrew/bin/ffmpeg /opt/homebrew/sbin/ffmpeg \
+           /usr/bin/ffmpeg /opt/local/bin/ffmpeg /snap/bin/ffmpeg; do
+    if [ -x "$c" ]; then FFMPEG="$c"; break; fi
+  done
+fi
+if [ -z "$FFMPEG" ]; then
+  echo "未找到 ffmpeg，请先安装并加入 PATH（或放到 /usr/local/bin、/opt/homebrew/bin 等已知位置）" >&2
+  exit 1
+fi
 if [ "$#" -eq 0 ]; then
   echo "用法: $0 [-f] [-t 秒] 视频文件..." >&2
   exit 2
@@ -64,7 +76,7 @@ for src in "$@"; do
 
   mkdir -p "$out"
   echo "切分: $src → $out/index.m3u8"
-  if ffmpeg -hide_banner -loglevel error -y -i "$src" \
+  if "$FFMPEG" -hide_banner -loglevel error -y -i "$src" \
       -c copy -f hls \
       -hls_time "$SEG" \
       -hls_playlist_type vod \

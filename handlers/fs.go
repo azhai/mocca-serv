@@ -230,14 +230,14 @@ var systemReservedNames = []string{
 // isExcludedName 判断条目是否不下发，两条规则任一命中即排除：
 //
 //  1. 以点（.）开头 —— 隐藏文件与隐藏目录，含 .DS_Store、._xxx（macOS 资源
-//     分支）、.git，以及本服务自己建的 .mocca（封面/缩略图，见
-//     models.HiddenDirName，它就在数据目录下，不挡会出现在浏览列表里）；
+//     分支）、.git，以及设备侧的元数据根 .mocca（封面、简介、索引，
+//     它就在媒体库旁，不挡会出现在浏览列表里）；
 //  2. 完整名字命中 systemReservedNames（不区分大小写），如盘根的 $RECYCLE.BIN。
 //
 // 除此之外不按字符做任何判断：名字里凡是不构成上述两条的符号一律保留。
 //
 // 只按名字判断，不看隐藏属性位：Local 与 SMB 对隐藏属性的语义并不一致。
-// 另外过滤只作用于「列表」，按显式路径取流（/d/.mocca/covers/x.jpg）
+// 另外过滤只作用于「列表」，按显式路径取流（/d/media/.mocca/ab/cd/xxxx.png）
 // 仍然照常可用，否则封面图会跟着挂掉。
 func isExcludedName(name string) bool {
 	if name == "" {

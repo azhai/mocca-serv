@@ -145,7 +145,11 @@ func FFmpegShot(drv drivers.Driver, rel, sec string) ([]byte, error) {
 		"-vf", "scale=400:300:force_original_aspect_ratio=increase:flags=lanczos,crop=400:300",
 		"-frames:v", "1",
 		"-f", "image2pipe", "-c:v", "png", "-")
-	cmd := exec.Command("ffmpeg", args...)
+	bin, err := ffmpegBin()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(bin, args...)
 	cmd.Stdin = stdin
 	var out, log bytes.Buffer
 	cmd.Stdout = &out

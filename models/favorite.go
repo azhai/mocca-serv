@@ -17,7 +17,7 @@ type Favorite struct {
 	Path      string    `json:"path"`
 	Name      string    `json:"name"`
 	Kind      int       `json:"kind"`
-	Thumb     string    `json:"thumb"` // 相对路径，见 ThumbRelPath
+	Thumb     string    `json:"thumb"` // 由客户端提交的缩略图路径；本服务不生成缩略图，实际恒为空
 	CreatedAt time.Time `json:"created_at"`
 }
 

@@ -26,10 +26,10 @@ Un solo código fuente, dos binarios. La única diferencia es una etiqueta de co
 | --- | --- | --- |
 | Compilación | `make full` (o `go build ./`) | `make api` (o `go build -tags noweb ./`) |
 | Resultado | `bin/mocca` | `bin/mocca-api` |
-| API REST + streaming | sí | sí (rutas idénticas) |
+| API REST + streaming | sí | sí (las rutas de la app son idénticas) |
 | Comando `passwd` | sí | sí |
 | Consola de administración `/admin/` | sí (integrada) | **no** —— `web/public/` no se compila |
-| Generador de portadas | sí | **no** —— el handler solo responde «no está en esta compilación» |
+| Endpoints de administración (almacenamiento, subida, edición, portada/captura, ajustes, usuarios) | sí | **no** —— todo el grupo no se registra (HTTP 404) |
 
 ## Inicio rápido
 
@@ -57,7 +57,7 @@ las variables de entorno del sistema con el prefijo `MOCCA_`. Prioridad: valores
 | Clave `.env` | Variable de entorno | Valor por defecto | Significado |
 | --- | --- | --- | --- |
 | `ADDR` | `MOCCA_ADDR` | `:8000` | Dirección de escucha |
-| `DATA_DIR` | `MOCCA_DATA_DIR` | `data` | Directorio de datos: base de datos, portadas y miniaturas |
+| `DATA_DIR` | `MOCCA_DATA_DIR` | `data` | Aquí vive la base de datos; las portadas y los índices están del lado del dispositivo, junto a los medios |
 | `JWT_SECRET` | `MOCCA_JWT_SECRET` | `mocca-dev-secret` | Clave de firma de tokens —— cámbiala en producción |
 | `ADMIN_PASSWORD` | `MOCCA_ADMIN_PASSWORD` | `@Mocca/1` | Contraseña del primer administrador, solo si no existe ninguno |
 
@@ -66,7 +66,7 @@ las variables de entorno del sistema con el prefijo `MOCCA_`. Prioridad: valores
 - **Almacenamientos** —— monta carpetas locales y recursos compartidos SMB (Samba); tantos puntos de montaje como quieras.
 - **Streaming por rangos de bytes** —— `GET /d/<ruta>` admite `Range`, rangos múltiples, `HEAD` y peticiones condicionales, así que los reproductores pueden buscar y reanudar.
 - **Metadatos de medios** —— título, duración, portada, descripción y varios autores por elemento; tipos vídeo / audio / imagen.
-- **Generador de portadas** —— la consola dibuja una portada de 1280×720 en un canvas y la guarda en `<directorio-de-datos>/.mocca/covers/` (solo compilación completa).
+- **Generador de portadas** (solo compilación completa) —— la portada viene de una subida del admin o de un fotograma de ffmpeg en el instante elegido (`/api/fs/shot` para un archivo, `/api/fs/patch` para toda una carpeta); se redimensiona a PNG 400×300 y se guarda **del lado del dispositivo**, junto a la mediateca, en `<raíz-del-almacenamiento>/.mocca/ab/cd/<resto-del-sha1>.png`.
 - **Consola de administración** (solo compilación completa) —— integrada y funcional sin conexión: almacenamientos, usuarios, metadatos, contraseñas de carpetas y subida por lotes con una barra de progreso por archivo.
 - **Cuentas y permisos** —— administrador / usuario / invitado; cada usuario solo ve su propio `base_path`; 12 avatares predefinidos (subir imágenes no está soportado, por diseño).
 - **Contraseñas de carpetas** —— se define una vez en la carpeta superior y todo el subárbol (streaming incluido) la exige; se guarda con bcrypt.

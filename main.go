@@ -49,10 +49,6 @@ func main() {
 		defer func() { _ = helpers.CloseErrorLog() }()
 	}
 
-	// 隐藏目录要在任何写入之前就绪
-	if err := models.EnsureHiddenDirs(cfg.DataDir); err != nil {
-		helpers.Fatalf("启动", "创建隐藏目录失败: %+v", errors.WithStack(err))
-	}
 	if _, err := models.Open(cfg.DBFile); err != nil {
 		helpers.Fatalf("启动", "打开数据库失败: %+v", errors.WithStack(err))
 	}

@@ -305,12 +305,13 @@ srv := &http.Server{
 
 | | 完整版 | 纯 API 版 |
 | --- | --- | --- |
-| 构建命令 | `make full` / `go build ./` | `make api` / `go build -tags noweb ./` |
+| 构建命令 | `make full` / `make web` / `go build ./` | `make api` / `go build -tags noweb ./` |
 | 产物 | `bin/mocca` | `bin/mocca-api` |
-| REST API（`/api/*`）与取流（`/d/*`） | 有 | 有（同一套路由，一字不改） |
+| APP 接口（初始化/登录、列目录、取详情、取流、弹幕、评论、收藏、目录密码状态） | 有 | 有（同一套路由，一字不改） |
+| 管理接口（存储维护、上传/改名/移动/删除、媒体编辑、封面/截图/HLS/重建索引/补截图、TMDB 刮削、目录密码设置、全局设置、用户管理） | 有 | **无**：整组不注册，请求落到默认 404 |
+| 取流与海报（`/d/*`、`/meta/poster`） | 有 | 有 |
 | `passwd` 子命令 | 有 | 有 |
-| 页面（浏览应用 `/` 与后台 `/admin/`） | 有（内嵌，含封面图制作） | **无**：`web/public/` 不参与编译 |
-| `POST /api/meta/cover`（封面图落盘） | 有 | **无**：处理器被换成一句说明 |
+| 页面（浏览应用 `/` 与后台 `/admin/`） | 有（内嵌） | **无**：`web/public/` 不参与编译 |
 
 ### 5.1 标签落在哪些文件
 
@@ -318,23 +319,29 @@ srv := &http.Server{
 | --- | --- | --- |
 | `web/embed.go` | `!noweb` | `//go:embed all:public`；`Embedded = true`；注册 `/`（浏览应用）与 `/admin/`（后台）路由 |
 | `web/noweb.go` | `noweb` | `Embedded = false`；`FS()` 返回错误；`Register()` 是空操作 |
-| `handlers/cover_admin.go` | `!noweb` | 封面图落盘：写入 `<data-dir>/.mocca/covers/` |
-| `handlers/cover_api.go` | `noweb` | 同名处理器，只回「本构建不含此功能」 |
+| `routes/build_full.go` | `!noweb` | `const AdminRoutes = true` |
+| `routes/build_api.go` | `noweb` | `const AdminRoutes = false`：管理接口整组不注册 |
 | `web/embed_test.go` | `!noweb` | 只对带后台的构建断言内嵌资源 |
-| `handlers/cover_test.go` | `!noweb` | 只对带后台的构建断言封面接口 |
 
-装配侧只有一个判断，`main.go` 里读编译期常量：
+装配侧有两个判断：`main.go` 里读编译期常量决定要不要挂页面，
+`routes.SetupAPIRoutes` 里读 `AdminRoutes` 决定要不要调 `SetupAdminRoutes`：
 
 ```go
 if web.Embedded {
 	web.Register(root, "/admin") // 完整版：浏览应用挂 /，后台挂 /admin/
-} else {
-	// 纯 API 版：什么都不挂，/ 与 /admin/* 和其它未命中路径一样走进默认 404
+}
+
+// routes.go 内：管理接口只在完整版注册
+if AdminRoutes {
+	SetupAdminRoutes(e)
 }
 ```
 
-**路由表在两种构建里完全一致**：`/api/meta/cover` 无条件注册，差异收在处理器实现里。
-于是 `routes/` 不需要任何 build tag，也不会出现「改了路由忘了同步另一个版本」。
+**管理路由表只有一份**（`routes/admin.go` 的 `SetupAdminRoutes`，不带构建标签），
+两种构建共用；差异只是一个布尔。这样不会出现「改了路由忘了同步另一个版本」，
+而测试可以直接调用 `SetupAdminRoutes`，让管理接口的处理器在两种构建下都被覆盖到。
+剥离效果本身由 `routes/routes_test.go` 断言：它比对路由注册表，
+要求必需接口两种构建都在、管理接口只在 `AdminRoutes` 为真的构建里。
 
 ### 5.2 页面入口（完整版）
 
@@ -384,11 +391,14 @@ make api
 curl -s -o /dev/null -w '%{http_code} %{content_type}\n' http://127.0.0.1:8000/admin/
 # 期望：404 application/json —— 不是 200 text/html，也不是跳向白屏
 
-curl -s -X POST http://127.0.0.1:8000/api/meta/cover
-# 期望：{"code":404,"message":"当前为纯 API 构建（-tags noweb），未包含封面图制作；…"}
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8000/api/storage/list
+# 期望：404 —— 管理路由整组不存在（没有中间件拦，也没有信封，就是路由未注册）
+
+curl -s -X POST http://127.0.0.1:8000/api/fs/list -H 'Content-Type: application/json' -d '{"path":"/"}'
+# 期望：200 的信封 —— APP 接口照常在（这里可能回业务错误码，但路由是通的）
 ```
 
-两种构建**共用同一份配置与数据目录**（`.env`、`mocca.db`、`.mocca/` 都通用）：
+两种构建**共用同一份配置与数据目录**（`.env`、`mocca.db`、设备侧 `.mocca/` 都通用）：
 可以直接把完整版换成纯 API 版（或反过来），不需要迁移任何数据。
 
 ---
@@ -403,7 +413,7 @@ curl -s -X POST http://127.0.0.1:8000/api/meta/cover
 ```bash
 make api          # 纯 API 版（本机平台）→ bin/mocca-api
 make full         # 完整版（本机平台）  → bin/mocca
-make dist         # 两种版本 × 全平台，产物带版本号：bin/mocca-<版本>.linux-amd64 …
+make all          # 两种版本 × 全平台，产物带版本号：bin/mocca-<版本>.linux-amd64 …（含 clean）
 ```
 
 放一份配置再启动（配置见 6.2）：
@@ -432,7 +442,7 @@ EOF
 | `.env` 短名 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `ADDR` | `MOCCA_ADDR` | `:8000` | 监听地址 |
-| `DATA_DIR` | `MOCCA_DATA_DIR` | `data` | 数据目录（库与封面/缩略图都在它下面） |
+| `DATA_DIR` | `MOCCA_DATA_DIR` | `data` | 数据目录（`mocca.db`、`error.log`；封面与 `.index.jsonl` 在设备侧，见 §6.3） |
 | `JWT_SECRET` | `MOCCA_JWT_SECRET` | `mocca-dev-secret` | JWT 签名密钥；**正式部署必须换掉** |
 | `ADMIN_PASSWORD` | `MOCCA_ADMIN_PASSWORD` | `@Mocca/1` | 首个管理员口令，仅在库里一个管理员都没有时使用 |
 
@@ -453,12 +463,13 @@ EOF
 | --- | --- |
 | `<data-dir>/mocca.db` | 业务数据：用户、挂载点、设置（全局选项）、收藏、评论、目录密码。媒体附加信息**不在库里**，在设备侧 `meta_dir`（见 API.md §6） |
 | `<data-dir>/error.log` | 崩溃与致命错误（panic 值 + 调用栈），只在出事时增长；见 §7.4 |
-| `<data-dir>/.mocca/covers/` | 封面图（库里存的是相对数据目录的路径，整个目录搬家后依然有效） |
-| `<data-dir>/.mocca/thumbs/` | 缩略图目录（当前实现不生成缩略图，目录仅预留） |
+| `<存储根>/.mocca/ab/cd/<sha1 余下部分>.png` | 封面图。按内容 sha1 寻址，存在各存储的 `meta_dir` 里（默认 `<root_folder_path>/.mocca`），**跟着媒体库走** |
+| 各媒体目录下的 `.index.jsonl` | 索引：该目录每个媒体文件的大小、修改时间、sha1、是否缺封面。同样在设备侧 |
 | `.env`（工作目录） | 配置；也可以放别处并用 `MOCCA_ENV_FILE` 指过去 |
 
-**务必持久化数据目录**：库里存的是相对路径，直接换盘搬走不丢记录；
-但服务本身没有别的状态，丢了它等于丢了全部配置。
+**要持久化的是两处**：数据目录（`mocca.db`、`error.log`）与设备侧 `meta_dir`（封面、`.index.jsonl`）。
+库里存的是相对路径，直接换盘搬走不丢记录；而服务本身没有别的状态，丢了数据目录等于丢了全部配置，
+丢了 `meta_dir` 则封面与简介全没（`.index.jsonl` 会重建，封面不会自动重做，只能靠「补充截图」补）。
 
 ### 6.4 反向代理注意
 

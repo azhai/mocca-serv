@@ -1,11 +1,17 @@
 # ── 项目配置 ──────────────────────────────────────────────
 # 同一份源码编出两个版本，差异**只在构建标签**，不靠删文件或改分支：
 #
-#   full（bin/mocca）     REST API + passwd + 管理后台（含封面图制作）
-#   api （bin/mocca-api） REST API + passwd。后台与其封面图制作被编译期剥离
+#   full（bin/mocca）     APP 接口 + 管理接口 + 内嵌网页（浏览应用与后台）
+#   api （bin/mocca-api） APP 接口 + passwd。管理接口与网页被编译期剥离
 #
-# 标签的实现落点：web/embed.go（!noweb）与 web/noweb.go（noweb），
-# 封面图接口同理（handlers/cover_admin.go 与 handlers/cover_api.go）。
+# 标签的实现落点：
+#   web/embed.go（!noweb）与 web/noweb.go（noweb）—— 网页资源的嵌入与否；
+#   routes/build_full.go（!noweb）与 routes/build_api.go（noweb）—— AdminRoutes 常量。
+#
+# API 版保留的接口（APP 用得到的）：初始化/注册/登录、me、收藏、评论、弹幕（含 SSE）、
+# 列目录/取详情/取流、海报、目录密码状态、探活。
+# API 版剥离的接口：存储维护、上传/改名/移动/删除、媒体编辑、封面/截图/HLS/重建索引/
+# 补截图、TMDB 刮削、目录密码设置、全局设置、用户管理 —— 见 routes/admin.go。
 APP     = mocca
 APP_API = mocca-api
 TAG_API = noweb      # 纯 API 版使用的构建标签
@@ -26,21 +32,24 @@ GOBUILD   = go build -trimpath -ldflags="$(LDFLAGS)"
 
 # ── 目标 ──────────────────────────────────────────────────
 
-.PHONY: all api web build-api build-full run run-api server clean test cover lint tidy
+.PHONY: all api web full build-api build-full run run-api server clean test cover lint tidy
 
-## api: 纯 API 版（本机平台）—— 无管理后台、无封面图制作
+## api: 纯 API 版（本机平台）—— 只有 APP 用得到的接口，无管理接口、无网页
 api:
-	@echo "Build $(APP_API) (API only: no admin UI, no cover maker) ..."
+	@echo "Build $(APP_API) (API only: app endpoints, no admin routes, no admin UI) ..."
 	mkdir -p bin
 	CGO_ENABLED=0 $(GOBUILD) -tags $(TAG_API) -o bin/$(APP_API) ./
 	@echo "✅ $(APP_API) 已生成（含 passwd 子命令）"
 
-## web: 完整版（本机平台）—— 带管理后台与封面图制作
+## web: 完整版（本机平台）—— APP 接口 + 管理接口 + 内嵌网页
 web:
-	@echo "Build $(APP) (web: API + admin UI + cover maker) ..."
+	@echo "Build $(APP) (full: app + admin routes + embedded UI) ..."
 	mkdir -p bin
 	CGO_ENABLED=0 $(GOBUILD) -o bin/$(APP) ./
 	@echo "✅ $(APP) 已生成（管理后台在 /admin/）"
+
+## full: web 的别名 —— 文档与脚本里一直写 `make full`，这里对齐
+full: web
 
 ## build-api: 交叉编译纯 API 版到 $(PLATFORMS)
 build-api:
@@ -93,7 +102,9 @@ test:
 	go test -race -coverpkg=./... ./... -coverprofile=/tmp/mocca.cover $(TAGS)
 	@go tool cover -func=/tmp/mocca.cover | tail -1
 
-## test-api: 用纯 API 版的标签跑测试（验证剥离后仍能编译、行为符合预期）
+## test-api: 用纯 API 版的标签跑测试。
+## 既验证剥离后仍能编译，也验证**剥离确实发生**：routes 包的路由表测试
+## 会断言管理接口在这一构建里没有注册（见 routes/routes_test.go）。
 test-api:
 	go test -tags $(TAG_API) ./...
 

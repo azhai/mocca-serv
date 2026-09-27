@@ -43,7 +43,7 @@ const DefaultTmdbLang = "zh-CN"
 // Config 运行期配置。命名与取值集中在这里，handler 不再散落读环境。
 type Config struct {
 	Addr           string // 监听地址
-	DataDir        string // 数据目录（封面/缩略图的隐藏目录在它下面）
+	DataDir        string // 数据目录：mocca.db 与 error.log 放这里
 	DBFile         string // 账号与业务库
 	JWTSecret      string // 令牌签名密钥
 	TokenExpiresIn int    // 令牌有效期（小时）

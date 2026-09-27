@@ -35,6 +35,10 @@ func newApp(t *testing.T) *echo.Echo {
 
 	e := echo.New()
 	routes.SetupAPIRoutes(e)
+	// 管理接口单独注册：纯 API 构建（-tags noweb）里 SetupAPIRoutes 不挂它们，
+	// 但处理器本身两种构建都编译。测试要覆盖的是处理器逻辑，所以无条件补上 ——
+	// 「纯 API 版确实不注册管理接口」由 routes 包自己的测试断言。
+	routes.SetupAdminRoutes(e)
 	return e
 }
 
