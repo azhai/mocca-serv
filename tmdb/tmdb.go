@@ -194,6 +194,9 @@ func redactUserInfo(raw string) string {
 //
 // TMDB 的 year 是**严格过滤**：猜错年份会直接空结果。所以带年份查不到时
 // 自动去掉年份再查一次——宁可多回几条近似结果，也不要给用户一个空列表。
+//
+// 拿到结果后统一交给 rankCandidates 重排：完全符合片名的排在最前，其次才看年份
+// （见 parse.go）。前端展示与默认填充都取排序后的第一条，这一步直接决定刮得准不准。
 func (c *Client) Search(ctx context.Context, query string, year int) ([]Candidate, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -205,10 +208,16 @@ func (c *Client) Search(ctx context.Context, query string, year int) ([]Candidat
 			return nil, err
 		}
 		if len(list) > 0 {
+			rankCandidates(list, query, year)
 			return list, nil
 		}
 	}
-	return c.search(ctx, query, 0)
+	list, err := c.search(ctx, query, 0)
+	if err != nil {
+		return nil, err
+	}
+	rankCandidates(list, query, year)
+	return list, nil
 }
 
 // search 一次检索；year<=0 则不传年份。

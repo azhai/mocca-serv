@@ -38,6 +38,106 @@ func TestGuessTitle(t *testing.T) {
 	}
 }
 
+// TestGuessTitleDashYear 短横年份必须拆开：`让子弹飞-2010` 之前整个成了关键词
+// （短横为保住 Spider-Man 而保留，于是连年份都认不出来），TMDB 自然搜不到。
+func TestGuessTitleDashYear(t *testing.T) {
+	cases := []struct {
+		name  string
+		title string
+		year  int
+	}{
+		{"让子弹飞-2010.mkv", "让子弹飞", 2010},
+		{"让子弹飞-2010-1080p.mkv", "让子弹飞", 2010},
+		{"Interstellar-2014.1080p.mkv", "Interstellar", 2014},
+		// 短横属于片名的一部分时不许乱切
+		{"Spider-Man.mkv", "Spider-Man", 0},
+		{"Spider-Man 2002.mkv", "Spider-Man", 2002},
+	}
+	for _, c := range cases {
+		got, year := GuessTitle(c.name)
+		if got != c.title || year != c.year {
+			t.Errorf("GuessTitle(%q) = (%q, %d)，want (%q, %d)", c.name, got, year, c.title, c.year)
+		}
+	}
+}
+
+// TestSplitKeyword 用户手填的检索词要拆成「片名 + 年份」：年份留在关键词里几乎必然搜不到，
+// 得作为 year 参数下发。只认末尾的「空格+年份」「短横+年份」两种写法。
+func TestSplitKeyword(t *testing.T) {
+	cases := []struct {
+		in    string
+		title string
+		year  int
+	}{
+		{"无间道 2002", "无间道", 2002},
+		{"无间道-2002", "无间道", 2002},
+		{"The Matrix 1999", "The Matrix", 1999},
+		{"无间道", "无间道", 0},
+		// 片名里的数字不是年份：不拆
+		{"2001太空漫游", "2001太空漫游", 0},
+		{"2001 A Space Odyssey", "2001 A Space Odyssey", 0},
+		// 末尾数字不像年份时不认
+		{"无间道 0001", "无间道 0001", 0},
+	}
+	for _, c := range cases {
+		got, year := SplitKeyword(c.in)
+		if got != c.title || year != c.year {
+			t.Errorf("SplitKeyword(%q) = (%q, %d)，want (%q, %d)", c.in, got, year, c.title, c.year)
+		}
+	}
+}
+
+// TestSearchRanksExactTitleThenYear 检索结果的排序：完全符合片名的排在最前，同档内年份相符的靠前。
+// 前端默认填充取的就是排序后的第一条，刮得准不准全看这一步。
+func TestSearchRanksExactTitleThenYear(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search/movie" {
+			w.Write([]byte(`{}`))
+			return
+		}
+		// 不论带不带年份都回同一份列表，且刻意把「部分符合」的排在 TMDB 相关度最前
+		w.Write([]byte(`{"results":[
+			{"id":10,"title":"无间道风云","original_title":"The Departed","release_date":"2006-10-06"},
+			{"id":11,"title":"无间道","original_title":"無間道","release_date":"2002-12-12"},
+			{"id":12,"title":"无间道","original_title":"無間道","release_date":"2003-10-01"}]}`))
+	}))
+	defer srv.Close()
+	oldBase := BaseURL
+	BaseURL = srv.URL
+	defer func() { BaseURL = oldBase }()
+
+	c, err := New("v3key", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		year int
+		want []int
+	}{
+		{2002, []int{11, 12, 10}}, // 同名的两条里，年份相符的 11 靠前
+		{2003, []int{12, 11, 10}}, // 换一个年份，顺序跟着换
+		{0, []int{11, 12, 10}},    // 不给年份时，完全相符的仍排在部分相符的前面
+	} {
+		list, err := c.Search(context.Background(), "无间道", tc.year)
+		if err != nil {
+			t.Fatalf("year=%d 检索失败: %v", tc.year, err)
+		}
+		got := make([]int, 0, len(list))
+		for _, m := range list {
+			got = append(got, m.ID)
+		}
+		if len(got) != len(tc.want) {
+			t.Fatalf("year=%d 候选数 = %d，want %d", tc.year, len(got), len(tc.want))
+		}
+		for i := range got {
+			if got[i] != tc.want[i] {
+				t.Errorf("year=%d 排序 = %v，want %v", tc.year, got, tc.want)
+				break
+			}
+		}
+	}
+}
+
 // fakeTMDB 起一个假 TMDB：/search/movie、/movie/<id>、以及图片路径都覆盖。
 // 校验 v3 密钥（api_key 查询串）与 v4 读令牌（Authorization: Bearer）两条鉴权路径。
 func fakeTMDB(t *testing.T, wantBearer bool) (*httptest.Server, *[]string) {

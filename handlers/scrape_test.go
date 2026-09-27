@@ -181,6 +181,44 @@ func TestScrapeSearchGuessesKeywordAndYear(t *testing.T) {
 	}
 }
 
+// TestScrapeSplitsKeywordYear 手填「片名 年份」/「片名-年份」时，后端要把年份拆出来当过滤条件，
+// 而不是把整串丢给 TMDB —— 后者几乎一定搜不到（前端输入框的提示就是这么让用户填的）。
+func TestScrapeSplitsKeywordYear(t *testing.T) {
+	e := newApp(t)
+	root := contentRoot(t)
+	addStorage(t, "/media", "Local", root)
+	seedVideo(t, root, "a.mp4", "video-content")
+
+	var gotQuery, gotYear string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/search/movie" {
+			gotQuery, gotYear = r.URL.Query().Get("query"), r.URL.Query().Get("year")
+			w.Write([]byte(`{"results":[{"id":1,"title":"无间道","release_date":"2002-12-12"}]}`))
+			return
+		}
+		w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	oldBase, oldImg := tmdb.BaseURL, tmdb.ImageBase
+	tmdb.BaseURL, tmdb.ImageBase = srv.URL, srv.URL+"/img"
+	defer func() { tmdb.BaseURL, tmdb.ImageBase = oldBase, oldImg }()
+	config.Cfg.TmdbAPIKey, config.Cfg.TmdbProxy = "v3key", ""
+	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
+
+	code, resp := call(t, e, http.MethodPost, "/api/fs/scrape",
+		`{"path":"/media/a.mp4","keyword":"无间道 2002"}`, admin)
+	if code != 200 {
+		t.Fatalf("检索应成功，got %d msg=%v", code, resp["message"])
+	}
+	if gotQuery != "无间道" || gotYear != "2002" {
+		t.Errorf("检索参数应拆出片名与年份，got query=%q year=%q", gotQuery, gotYear)
+	}
+	d, _ := resp["data"].(map[string]any)
+	if d["keyword"] != "无间道" || d["year"] != float64(2002) {
+		t.Errorf("回包关键词/年份不符: keyword=%v year=%v", d["keyword"], d["year"])
+	}
+}
+
 // TestScrapeUsesConfiguredProxy 端到端：TMDB_PROXY 必须真的接进刮削调用链。
 // 目标域名故意用不可解析的 .invalid —— 只有走了代理才会成功，直连必然 DNS 失败，
 // 所以这比「看代理有没有被访问过」更硬。

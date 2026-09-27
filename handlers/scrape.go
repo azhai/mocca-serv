@@ -29,9 +29,11 @@ import (
 
 // ScrapeReq 检索请求。
 type ScrapeReq struct {
-	Path    string `json:"path"`
-	Keyword string `json:"keyword"` // 留空则按文件名猜（去发布标记 + 提年份）
-	Year    int    `json:"year"`    // 仅在与 Keyword 同时给出时生效，用来收窄结果
+	Path string `json:"path"`
+	// Keyword 留空则按文件名猜；填写时可以是「片名 + 年份」（`无间道 2002`、`无间道-2002`），
+	// 末尾的年份会被拆出来当过滤条件（见 tmdb.SplitKeyword）。
+	Keyword string `json:"keyword"`
+	Year    int    `json:"year"` // 仅在与 Keyword 同时给出时生效，用来收窄结果
 }
 
 // ScrapeApplyReq 应用请求：把某条 TMDB 结果的详情与海报写进该文件。
@@ -128,9 +130,13 @@ func ScrapeSearch(c *echo.Context) error {
 		return helpers.Fail(c, helpers.CodeBadRequest, err.Error())
 	}
 
+	// 关键词的来源有两种，都要把年份与片名分开：TMDB 的 year 是严格过滤参数，
+	// 年份留在关键词里（`让子弹飞 2010`）几乎必然搜不到。
 	keyword, year := strings.TrimSpace(req.Keyword), 0
 	if keyword == "" {
 		keyword, year = tmdb.GuessTitle(t.name)
+	} else {
+		keyword, year = tmdb.SplitKeyword(keyword)
 	}
 	if req.Year > 0 {
 		year = req.Year

@@ -2,6 +2,7 @@ package tmdb
 
 import (
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -45,6 +46,14 @@ var (
 	// sepRe 字段分隔符：点/下划线/加号/半角与全角逗号一律视作空白
 	// （连字符保留，Spider-Man 要留住）。\x{FF0C} 是全角逗号。
 	sepRe = regexp.MustCompile(`[._+,\x{FF0C}]`)
+	// dashYearRe 「短横 + 4 位数字」：`让子弹飞-2010` 的短横是分隔符，不是片名的一部分。
+	// 只切短横后面紧跟 4 位数字的位置，`Spider-Man` 这类片名里的短横照旧保留。
+	dashYearRe = regexp.MustCompile(`-(\d{4})`)
+	// tailYearRe 检索词末尾的「空格/短横 + 年份」，供 SplitKeyword 拆「片名 + 年份」用。
+	tailYearRe = regexp.MustCompile(`[\s\-]+(19\d{2}|20\d{2})$`)
+	// keySepRe 比较片名时视作空白的装饰性标点：全角/半角冒号、间隔号、顿号、逗号、下划线。
+	// 于是 `Spider-Man: No Way Home` 与用户输入的 `Spider-Man No Way Home` 视为同一个片名。
+	keySepRe = regexp.MustCompile(`[:：·、,，_]`)
 	// trimCut 词首尾的装饰性符号
 	trimCut = " \t-—·:：;；\"'“”"
 )
@@ -76,6 +85,10 @@ func GuessTitle(filename string) (title string, year int) {
 		}
 		return " " + strings.Join(filterTokens(inner), " ") + " "
 	})
+
+	// 1.5) 短横年份当分隔符：`让子弹飞-2010`、`让子弹飞-2010-1080p` 里的短横不是片名的一部分，
+	// 留着会让整个 `让子弹飞-2010` 变成一个词、年份也认不出来。只切短横后面紧跟 4 位数字的位置。
+	pre = dashYearRe.ReplaceAllString(pre, " $1")
 
 	// 2) 切词
 	var fields []string
@@ -152,4 +165,73 @@ func asYear(tok string) int {
 		return 0
 	}
 	return y
+}
+
+// SplitKeyword 拆开用户手填的检索词「片名 + 年份」。
+//
+// 只认末尾的「空格+年份」或「短横+年份」（`无间道 2002`、`无间道-2002`）—— 前端输入框的
+// 提示就是这么写的。要拆的原因是这两串直接丢给 TMDB 基本搜不到：年份得作为 year 参数下发，
+// 而不是留在关键词里。夹在片名中间的数字（`2001太空漫游`）一律保持原样，那是片名的一部分。
+func SplitKeyword(s string) (title string, year int) {
+	s = strings.TrimSpace(s)
+	m := tailYearRe.FindStringSubmatch(s)
+	if m == nil {
+		return s, 0
+	}
+	if title = strings.Trim(strings.TrimSpace(s[:len(s)-len(m[0])]), trimCut); title == "" {
+		return s, 0
+	}
+	return title, asYear(m[1])
+}
+
+// rankCandidates 稳定重排候选，把「最可能是这一部」的排到最前（界面展示与默认填充都用它）：
+//
+//  1. 片名匹配度：完全相符 > 部分相符 > 其它（候选带译名与原名，两者任一相符都算）；
+//  2. 同一档内，年份与查询相符的靠前 —— 年份来自文件名或用户填的「片名 年份」。
+//
+// 同级保持 TMDB 原有的相关度顺序（稳定排序），因此只在有更好的选择时才改变次序。
+func rankCandidates(list []Candidate, query string, year int) {
+	q := titleKey(query)
+	if q == "" || len(list) < 2 {
+		return
+	}
+	sort.SliceStable(list, func(i, j int) bool {
+		if ti, tj := titleTier(list[i], q), titleTier(list[j], q); ti != tj {
+			return ti < tj
+		}
+		if year > 0 {
+			mi, mj := list[i].Year == year, list[j].Year == year
+			if mi != mj {
+				return mi
+			}
+		}
+		return false
+	})
+}
+
+// titleTier 片名匹配档位：0 完全相符，1 部分相符，2 其它（越小越靠前）。
+func titleTier(c Candidate, q string) int {
+	t, o := titleKey(c.Title), titleKey(c.OriginalTitle)
+	if t == q || (o != "" && o == q) {
+		return 0
+	}
+	if partlyMatches(t, q) || (o != "" && partlyMatches(o, q)) {
+		return 1
+	}
+	return 2
+}
+
+// partlyMatches 双向包含即算部分相符。不足两字的片名不参与包含判断，
+// 否则 `a` 这种短名会被任何关键词「包含」，把真正的结果挤到后面。
+func partlyMatches(name, q string) bool {
+	if len([]rune(name)) < 2 || len([]rune(q)) < 2 {
+		return false
+	}
+	return strings.Contains(name, q) || strings.Contains(q, name)
+}
+
+// titleKey 归一化片名用于比较：转小写、把装饰性标点当空白、压缩空白。只用于比较，不改展示原文。
+func titleKey(s string) string {
+	s = keySepRe.ReplaceAllString(strings.ToLower(strings.TrimSpace(s)), " ")
+	return strings.Join(strings.Fields(s), " ")
 }
