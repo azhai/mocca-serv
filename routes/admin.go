@@ -40,6 +40,7 @@ func SetupAdminRoutes(e *echo.Echo) {
 	admin.POST("/fs/shot", handlers.FsShot)       // FFmpeg 指定秒数截图作视频封面
 	admin.POST("/fs/hls", handlers.FsHLS)         // 切分旁路 HLS：.hls/<文件名>/（只切不转）
 	admin.POST("/fs/reindex", handlers.FsReindex) // 按增量重建索引：比 size+modified，变了才重算 sha1
+	admin.POST("/fs/export", handlers.FsExport)   // 数据迁移：把选中视频的 .mocca 数据打包为 tar.gz
 	admin.POST("/fs/uncov", handlers.FsUncov)     // 删除封面（与上传封面/FFmpeg 截图相对）
 	admin.POST("/fs/patch", handlers.FsPatch)     // 目录级补充截图：给缺封面的视频批量生封面
 	// TMDB 刮削：先检索候选，再把选中的那条写进 .mocca 附加信息与封面

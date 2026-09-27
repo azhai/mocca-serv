@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -1490,6 +1492,186 @@ func FsReindex(c *echo.Context) error {
 // errReindexMissing 重新索引时某个路径不存在。单独一个哨兵值，好把它映射成 404
 // 而不是笼统的 500 —— 这是调用方能自己修的错。
 var errReindexMissing = errors.New("路径不存在")
+
+// exportMetaDir 元数据根目录名。包内数据带这个前缀，解压到设备根目录即还原。
+const exportMetaDir = ".mocca"
+
+// ExportReq 数据迁移导出请求：把选中视频在 .mocca 里的数据打包成 tar.gz 下载。
+type ExportReq struct {
+	Path  string   `json:"path"`  // 单路径（兼容脚本调用）
+	Paths []string `json:"paths"` // 批量（后台「视频切分」页多选）
+}
+
+// exportItem manifest 里的一条：一个视频 → 它在 .mocca 里的数据。
+type exportItem struct {
+	Path  string   `json:"path"`
+	SHA1  string   `json:"sha1"`
+	Files []string `json:"files"`
+	Note  string   `json:"note,omitempty"`
+}
+
+// exportFile 一个待写进包里的数据文件。
+type exportFile struct {
+	drv  drivers.Driver
+	rel  string // 相对元数据根（驱动原生分隔符）
+	name string // tar 内路径（固定 .mocca/ 前缀 + 正斜杠）
+}
+
+// FsExport 数据迁移（管理员）：把选中视频在 .mocca 里的数据（海报 .png、附加信息 .meta、
+// 弹幕评论 .danmaku.jsonl）保持 ab/cd/ 子目录层级打包成一个 .tar.gz 并直接下发。
+//
+// 元数据根的布局是「按 sha1 内容寻址」：<元数据根>/ab/cd/<sha1[4:]>.<ext>。驱动接口
+// 只有 MetaStat/MetaOpen，**没有枚举能力**，所以只能由 sha1 推出这三个已知路径逐个探测，
+// 存在的才收进包 —— 某个视频没有海报/弹幕是常态，不是错误。
+//
+// 分成"预检"与"流式写出"两段：一旦开始写响应体，就再也没法改回 JSON 错误信封，所以路径
+// 解析、驱动打开、存在性探测全在写头之前做完。中途单文件读失败只能中断下载（前面写出的是
+// 合法的 tar.gz 前缀，客户端表现为包不完整）。
+func FsExport(c *echo.Context) error {
+	var req ExportReq
+	if err := c.Bind(&req); err != nil {
+		req.Path = c.QueryParam("path")
+	}
+	paths := req.Paths
+	if req.Path != "" {
+		paths = append(paths, req.Path)
+	}
+	if len(paths) == 0 {
+		return helpers.Fail(c, helpers.CodeBadRequest, "请先选择要导出的视频")
+	}
+
+	// 一批勾选可能跨挂载点：每个存储只开一次驱动，且要留到流写完才关。
+	var (
+		files  []exportFile
+		items  []exportItem
+		opened []drivers.Driver
+	)
+	defer func() {
+		for _, d := range opened {
+			_ = d.Close()
+		}
+	}()
+	drvOf := map[string]drivers.Driver{}
+	seen := map[string]bool{}
+
+	for _, p := range paths {
+		stor, rel, err := resolveStorageStrict(p)
+		if err != nil {
+			return helpers.Fail(c, helpers.CodeNotFound, err.Error())
+		}
+		drv, ok := drvOf[stor.MountPath]
+		if !ok {
+			drv, err = drivers.Open(stor)
+			if err != nil {
+				return helpers.Fail(c, helpers.CodeInternal, err.Error())
+			}
+			drvOf[stor.MountPath] = drv
+			opened = append(opened, drv)
+		}
+
+		item := exportItem{Path: p, Files: []string{}}
+		sha1hex := sha1OfMedia(drv, rel)
+		if sha1hex == "" {
+			// 索引里没有这条记录（或这个目录压根没索引）：退回整读文件算 sha1。
+			//
+			// 元数据全部按 sha1 寻址，拿不到指纹就等于找不到海报/简介/弹幕 —— 早先这里
+			// 直接放弃，结果是"视频明明刮削过，却因为索引没跟上而导不出来"。代价是
+			// O(文件大小)，但「数据迁移」是用户显式点的一次性操作，慢也比导不出强。
+			sum, herr := sha1OfRel(drv, rel)
+			if herr != nil {
+				item.Note = "读文件失败，无法计算指纹"
+				items = append(items, item)
+				continue
+			}
+			sha1hex = sum
+			item.Note = "索引无记录，指纹按文件内容现算"
+		}
+		item.SHA1 = sha1hex
+		// 海报 / 附加信息 / 弹幕三条已知路径，探测到哪份收哪份。
+		for _, mk := range []func(string) (string, error){
+			mediaindex.PosterRel, mediaindex.SummaryRel, mediaindex.DanmakuRel,
+		} {
+			r, merr := mk(sha1hex)
+			if merr != nil {
+				continue // sha1 已校验过，这里不该失败；真失败了也只是少一份文件
+			}
+			if _, serr := drv.MetaStat(r); serr != nil {
+				continue
+			}
+			name := path.Join(exportMetaDir, filepath.ToSlash(r))
+			item.Files = append(item.Files, name)
+			if seen[name] {
+				continue // 同一 sha1 被两条路径选中（同名内容）时不重复入包
+			}
+			seen[name] = true
+			files = append(files, exportFile{drv: drv, rel: r, name: name})
+		}
+		items = append(items, item)
+	}
+	if len(files) == 0 {
+		return helpers.Fail(c, helpers.CodeNotFound,
+			"所选视频在 .mocca 中没有可导出的数据（先索引或刮削一次？）")
+	}
+
+	now := time.Now()
+	h := c.Response().Header()
+	h.Set("Content-Type", "application/gzip")
+	// 文件名固定 ASCII，避免 Content-Disposition 的编码问题
+	h.Set("Content-Disposition", `attachment; filename="`+now.Format("mocca-export-20060102-150405")+`.tar.gz"`)
+	h.Set("Cache-Control", "no-store")
+
+	gz := gzip.NewWriter(c.Response())
+	tw := tar.NewWriter(gz)
+
+	manifest, err := json.MarshalIndent(map[string]any{
+		"version":    1,
+		"created_at": now.UTC().Format(time.RFC3339),
+		"meta_dir":   exportMetaDir,
+		"items":      items,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := writeTarBytes(tw, "manifest.json", manifest, now); err != nil {
+		return err
+	}
+	for _, f := range files {
+		if err := writeTarFile(tw, f, now); err != nil {
+			return err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return err
+	}
+	return gz.Close()
+}
+
+// writeTarBytes 往 tar 里写一个内存中的条目。
+func writeTarBytes(tw *tar.Writer, name string, b []byte, mod time.Time) error {
+	if err := tw.WriteHeader(&tar.Header{
+		Name: name, Mode: 0o644, Size: int64(len(b)), ModTime: mod,
+	}); err != nil {
+		return err
+	}
+	_, err := tw.Write(b)
+	return err
+}
+
+// writeTarFile 把元数据根下的一个文件原样写进 tar（大小以 MetaOpen 返回的为准）。
+func writeTarFile(tw *tar.Writer, f exportFile, mod time.Time) error {
+	src, size, err := f.drv.MetaOpen(f.rel)
+	if err != nil {
+		return errors.Wrapf(err, "读 %s 失败", f.rel)
+	}
+	defer func() { _ = src.(interface{ Close() error }).Close() }()
+	if err := tw.WriteHeader(&tar.Header{
+		Name: f.name, Mode: 0o644, Size: size, ModTime: mod,
+	}); err != nil {
+		return err
+	}
+	_, err = io.Copy(tw, src)
+	return err
+}
 
 // FsRename 同目录改名（管理员）。
 func FsRename(c *echo.Context) error {

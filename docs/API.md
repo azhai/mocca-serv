@@ -334,7 +334,8 @@ curl -s http://127.0.0.1:8000/api/ping      # pong
 三者都不经过目录密码校验，也不受 `base_path` 限制 —— 只有管理员能调，这一点由中间件保证。
 
 媒体条目编辑与封面/刮削类写操作（`/api/fs/edit`、`/api/fs/cov`、`/api/fs/shot`、
-`/api/fs/patch`、`/api/fs/scrape`、`/api/fs/scrape/apply`）见 [§6](#6-媒体附加信息与封面)。
+`/api/fs/patch`、`/api/fs/scrape`、`/api/fs/scrape/apply`）见 [§6](#6-媒体附加信息与封面)；
+数据迁移导出 `/api/fs/export`（只读，但同为管理接口）见 §6.11。
 
 ### 4.5 上传（管理员）
 
@@ -614,6 +615,56 @@ sha1 来自媒体文件内容，记在同目录的 `.index.jsonl`（`mocca index
 
 一次只处理一个文件：管理后台的「视频切分」页对多选**逐个发请求**（并发 2），各自报状态，
 某个失败不牵连其余。命令行等价物是 `tools/gen_hls.sh`（同一约定、同一套 ffmpeg 参数）。
+
+### 6.11 POST /api/fs/export （管理员）
+
+数据迁移：把选中视频在**设备侧 `.mocca`** 里的关联数据打包成一个 `.tar.gz` 直接下发，
+换机器/重装服务时把封面、简介、弹幕一起带走。
+
+```json
+{ "paths": ["/media/电影/a.mp4", "/media/电影/b.mkv"] }
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `paths` | 是 | 要导出的文件路径列表（多选）；也接受单路径 `path` |
+| `path` | 否 | 单个路径，与 `paths` 等效（脚本调用方便） |
+
+收集的是三份按 sha1 寻址的数据（见 [§7](#7-收藏评论与弹幕)），路径保持 `ab/cd` 子目录层级：
+
+```text
+.mocca/ab/cd/<sha1[4:]>.png            海报
+.mocca/ab/cd/<sha1[4:]>.meta           附加信息（简介/导演/主演…）
+.mocca/ab/cd/<sha1[4:]>.danmaku.jsonl  弹幕与评论
+```
+
+包内路径**带 `.mocca/` 前缀**，所以解压到设备根目录即一步到位还原；包根另有一份
+`manifest.json` 说明「哪个视频 ↔ 哪个 sha1 ↔ 包内实际包含哪些文件」：
+
+```json
+{ "version": 1, "created_at": "2026-09-28T04:00:00Z", "meta_dir": ".mocca",
+  "items": [ { "path": "/media/电影/a.mp4",
+               "sha1": "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0",
+               "files": [ ".mocca/a1/b2/c3d4….png", ".mocca/a1/b2/c3d4….meta" ] },
+             { "path": "/media/电影/b.mkv",
+               "sha1": "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c",
+               "files": [],
+               "note": "索引无记录，指纹按文件内容现算" } ] }
+```
+
+约定与边界：
+
+- **成功时响应体是二进制 tar.gz 流**（`Content-Type: application/gzip`、
+  `Content-Disposition: attachment; filename="mocca-export-<时间戳>.tar.gz"`、`Cache-Control: no-store`），
+  **不是 JSON 信封**；失败时才回 `application/json`（HTTP 仍 200）。前端据 `Content-Type` 区分。
+- **指纹来源**：优先读父目录的 `.index.jsonl`；索引里没有该文件（或这个目录压根没索引）时，
+  **退回整读文件现算 sha1** —— 这一步是 O(文件大小)，几 GB 的片子会明显变慢，但不会导不出来。
+  这类条目在 `manifest.json` 里带 `note` 说明指纹是现算的；连文件都读不了（不存在 / 是目录）时
+  标 `"note": "读文件失败，无法计算指纹"`，都不阻断其余条目。
+- 某份数据不存在（没海报/没弹幕）是正常的，探测到哪份收哪份，不报错。
+- 全部选中项都没有可导出数据时回 `code: 404`（不发空包）。
+- 同一 sha1 被多条路径选中时按包内路径**自动去重**。
+- 挂在多个挂载点上的路径可以一次导出；不经过目录密码校验（与其余管理接口一致）。
 
 ## 7. 收藏、评论与弹幕
 

@@ -305,7 +305,7 @@ srv := &http.Server{
 
 | | 完整版 | 纯 API 版 |
 | --- | --- | --- |
-| 构建命令 | `make full` / `make web` / `go build ./` | `make api` / `go build -tags noweb ./` |
+| 构建命令 | `make full` / `make web` / `go build -tags nopgsql ./` | `make api` / `go build -tags noweb,nopgsql ./` |
 | 产物 | `bin/mocca` | `bin/mocca-api` |
 | APP 接口（初始化/登录、列目录、取详情、取流、弹幕、评论、收藏、目录密码状态） | 有 | 有（同一套路由，一字不改） |
 | 管理接口（存储维护、上传/改名/移动/删除、媒体编辑、封面/截图/HLS/重建索引/补截图、TMDB 刮削、目录密码设置、全局设置、用户管理） | 有 | **无**：整组不注册，请求落到默认 404 |
@@ -343,6 +343,22 @@ if AdminRoutes {
 剥离效果本身由 `routes/routes_test.go` 断言：它比对路由注册表，
 要求必需接口两种构建都在、管理接口只在 `AdminRoutes` 为真的构建里。
 
+**`nopgsql`：两版都带，去掉 PostgreSQL 驱动。** 本服务只连 sqlite
+（`models.Open` 里写死 `Type: "sqlite"`），而 goent 的驱动注册是把 pgsql 与 sqlite
+两个驱动一起 import 的 —— pgsql 那条链会把 pgx 连同 puddle、x/text 共 18 个包、
+约 3.6MB 一起链进二进制。标签成对落在**对端仓库** `/opt/repos/goent`
+（本仓库以 `replace` 引入，见 `go.mod`）：
+
+| 文件 | 构建标签 | 作用 |
+| --- | --- | --- |
+| `goent/drivers/dialect_pgsql.go` | `!nopgsql` | `openPgDialect` = `pgsql.OpenDSN`，即默认行为不变 |
+| `goent/drivers/dialect_nopgsql.go` | `nopgsql` | `openPgDialect` 返回 `nil`：打不开，调用方本就判 nil |
+| `goent/schema_ops_pgsql.go` | `!nopgsql` | `newPgSchemaDriver` = `pgsql.NewPgSchemaDriver` |
+| `goent/schema_ops_nopgsql.go` | `nopgsql` | `newPgSchemaDriver` 返回 `nil`：该构建里这条分支取不到 |
+
+默认构建（不带该标签）行为完全不变，goent 的其它使用者不受影响，只有本仓库的两个
+产物显式加了它。要连 PostgreSQL 时把 Makefile 里的 `TAG_NOPG` 清空重建即可。
+
 ### 5.2 页面入口（完整版）
 
 | 地址 | 内容 |
@@ -370,17 +386,22 @@ public/
 目录请求（结尾带 `/` 又不是 `/` 与 `/admin/` 这两个入口的）一律 404：否则 `css/` 与 `js/`
 里没有 `index.html`，`http.FileServer` 会回一份**目录列表**，把内嵌资源全列出来。
 
-### 5.3 实测差异（`-ldflags="-s -w"`，macOS arm64）
+### 5.3 实测体积（`-ldflags="-s -w" -trimpath`，macOS arm64）
 
 | | 完整版 | 纯 API 版 |
 | --- | --- | --- |
-| 二进制体积 | 17.3 MB | 17.1 MB |
+| 二进制体积（带 `nopgsql`） | 15.4 MB | 13.7 MB |
+| 二进制体积（不带 `nopgsql`） | 19.0 MB | 17.4 MB |
 | 含 HTML / CSS / JS | 是 | **否** |
 | 可制作封面图 | 是 | **否** |
 
-两个页面都是手写的轻量 SPA（mithril + `app.js` + `home.js` + `styles.css` + `home.css`，
-合计约 165KB），**因此纯 API 版省下的体积很小**。它的价值在暴露面：二进制里没有任何
-HTML/JS，也没有往数据目录写文件的封面图接口。
+两个页面都是手写的轻量 SPA（mithril + `app.js` + `home.js` + `styles.css` + `home.css`
++ logo，`web/public/` 合计约 900KB），加上管理接口的机器码，两版相差约 1.7MB。
+
+**体积的大头是运行库，不是本项目代码**：runtime 与 pclntab 约 6.4MB、其他标准库约 6MB、
+`modernc.org/sqlite` 约 1.9MB，而 mocca 自己的代码只有 0.11MB。所以「纯 API 版应该小很多」
+是错觉；剥离的价值在暴露面：二进制里没有任何 HTML/JS，也没有往数据目录写文件的封面图接口。
+体积上真正有意义的一刀是 `nopgsql`（见 5.1 末），去掉 PostgreSQL 驱动即省 3.6MB。
 
 ### 5.4 怎么验证剥离确实生效
 

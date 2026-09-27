@@ -595,6 +595,45 @@ async function startReindex() {
   m.redraw();
 }
 
+// 数据迁移：把勾选视频在 .mocca 里的数据（海报 / 附加信息 / 弹幕评论）打包下载。
+//
+// 不能走 api()：那条路把响应体当 JSON 解析，而这里的响应是 tar.gz 二进制流。
+// 成败靠 Content-Type 区分 —— 失败仍是业务信封（HTTP 200 + JSON），得先认出来再抛错。
+async function startExport() {
+  const s = state.hls;
+  const picked = s.files.filter(f => s.sel[f.path]);
+  if (!picked.length) return;
+  s.busy = true;
+  m.redraw();
+  try {
+    const resp = await fetch(state.base + '/fs/export', {
+      method: 'POST',
+      headers: { 'Authorization': state.token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths: picked.map(f => f.path) }),
+    });
+    if ((resp.headers.get('Content-Type') || '').includes('json')) {
+      const env = await resp.json();
+      throw new Error(env.message || '导出失败');
+    }
+    const blob = await resp.blob();
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = /filename="([^"]+)"/.exec(cd);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = m ? m[1] : `mocca-export-${picked.length}.tar.gz`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    say(`已导出 ${picked.length} 个视频的 .mocca 数据`);
+  } catch (e) {
+    say(e.message, true);
+  }
+  s.busy = false;
+  m.redraw();
+}
+
 const HlsCut = {
   view() {
     const s = state.hls;
@@ -619,6 +658,14 @@ const HlsCut = {
             '封面与简介按 sha1 寻址，换了文件却看不到封面时用它修。',
           onclick: () => guard(startReindex),
         }, s.busy ? '处理中…' : `重新索引（${picked}）`),
+        // 数据迁移：把勾选视频在 .mocca 里的数据打包带走（备份 / 换设备，详见 startExport）
+        m('button.ghost', {
+          disabled: s.busy || !picked,
+          title: '把勾选视频在 .mocca 里的数据（海报 / 附加信息 / 弹幕评论）按 ab/cd 子目录打包为 tar.gz 下载。' +
+            '包内路径带 .mocca/ 前缀，解压到设备根目录即可还原；另附 manifest.json 说明对应关系。' +
+            '索引里没有的视频会按文件内容现算指纹，大文件这一趟会明显变慢。',
+          onclick: startExport,
+        }, s.busy ? '处理中…' : `数据迁移（${picked}）`),
       ]),
       s.listed && !s.files.length
         ? m('p.muted', '这个目录（当前这一层）没有视频文件')
