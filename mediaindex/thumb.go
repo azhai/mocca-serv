@@ -3,11 +3,10 @@ package mediaindex
 import (
 	"bytes"
 	"image"
-	"image/draw"
+	"image/color"
 	_ "image/gif"
 	_ "image/jpeg"
 	"image/png"
-	_ "image/png"
 	"io"
 	"math"
 	"os/exec"
@@ -43,31 +42,89 @@ func ResizeCoverPNG(data []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// coverCrop 先等比放大到至少一边填满目标框，再居中裁剪到目标尺寸。
-// 用标准库 image/draw 的矩形映射做最近邻缩放，够缩略图用（不新增 x/image 依赖）。
+// coverCrop 居中裁剪 + 缩放，两步合成一步：先在源图里取「以中心为准、与目标同比例」的那块，
+// 再把它重采样成 w×h。
+//
+// 注意 image/draw 的 Draw **不做缩放**（它把源图某个点对齐到目标矩形后 1:1 拷贝像素）。
+// 原先写成「draw 到放大后的画布 → 再 draw 裁剪」两步，实际效果是：从源图**左上角**抠走
+// 一块原尺寸像素，既不放大也不居中 —— 源图越大越明显：1080p 剧照只会剩下左上角一小片，
+// 750px 高的海报只剩上半截。因为截图（FFmpeg）产出的本来就是 400×300（此时恒等变换），
+// 这个错一直没被那一路暴露出来。
+//
+// 这里改成逐目标像素重采样：缩小时取源像素的**面积平均**（相当于带抗锯齿的缩小），
+// 放大时该面积不足一个源像素，自然退化成最近邻。
 func coverCrop(src image.Image, w, h int) image.Image {
 	sb := src.Bounds()
 	sw, sh := sb.Dx(), sb.Dy()
-	if sw <= 0 || sh <= 0 {
+	if sw <= 0 || sh <= 0 || w <= 0 || h <= 0 {
 		return src
 	}
+	// 源图里该映射到目标框的那块：比例与目标一致、面积尽量大、居中
 	scale := math.Max(float64(w)/float64(sw), float64(h)/float64(sh))
-	nw := int(float64(sw)*scale + 0.5)
-	nh := int(float64(sh)*scale + 0.5)
-	if nw < 1 {
-		nw = 1
-	}
-	if nh < 1 {
-		nh = 1
-	}
-	scaled := image.NewRGBA(image.Rect(0, 0, nw, nh))
-	draw.Draw(scaled, scaled.Bounds(), src, sb.Min, draw.Src)
+	cropW := math.Min(float64(sw), float64(w)/scale)
+	cropH := math.Min(float64(sh), float64(h)/scale)
+	ox := float64(sb.Min.X) + (float64(sw)-cropW)/2
+	oy := float64(sb.Min.Y) + (float64(sh)-cropH)/2
 
 	dst := image.NewRGBA(image.Rect(0, 0, w, h))
-	sx := (nw - w) / 2
-	sy := (nh - h) / 2
-	draw.Draw(dst, dst.Bounds(), scaled, image.Pt(sx, sy), draw.Src)
+	for dy := 0; dy < h; dy++ {
+		y0 := oy + float64(dy)*cropH/float64(h)
+		y1 := oy + float64(dy+1)*cropH/float64(h)
+		for dx := 0; dx < w; dx++ {
+			x0 := ox + float64(dx)*cropW/float64(w)
+			x1 := ox + float64(dx+1)*cropW/float64(w)
+			dst.Set(dx, dy, areaAverage(src, x0, y0, x1, y1))
+		}
+	}
 	return dst
+}
+
+// areaAverage 求源图 [x0,x1)×[y0,y1) 这块像素的平均色。这块比一个源像素还小时（放大）
+// 就退化成取那一个像素的颜色。返回非预乘颜色，配合 dst.Set 用（Set 自己会做预乘转换）。
+func areaAverage(src image.Image, x0, y0, x1, y1 float64) color.NRGBA {
+	b := src.Bounds()
+	ix0, iy0 := int(math.Floor(x0)), int(math.Floor(y0))
+	ix1, iy1 := int(math.Ceil(x1)), int(math.Ceil(y1))
+	if ix1 <= ix0 {
+		ix1 = ix0 + 1
+	}
+	if iy1 <= iy0 {
+		iy1 = iy0 + 1
+	}
+	// 夹进源图范围（crop 区已在界内，这里只是防浮点取整溢出）
+	if ix0 < b.Min.X {
+		ix0 = b.Min.X
+	}
+	if iy0 < b.Min.Y {
+		iy0 = b.Min.Y
+	}
+	if ix1 > b.Max.X {
+		ix1 = b.Max.X
+	}
+	if iy1 > b.Max.Y {
+		iy1 = b.Max.Y
+	}
+	if ix1 <= ix0 || iy1 <= iy0 {
+		return color.NRGBA{}
+	}
+	// At().RGBA() 给的是**预乘**的 16 位值，先按预乘累加，最后再还原成非预乘
+	var sr, sg, sb, sa, n uint64
+	for y := iy0; y < iy1; y++ {
+		for x := ix0; x < ix1; x++ {
+			r, g, bl, a := src.At(x, y).RGBA()
+			sr, sg, sb, sa, n = sr+uint64(r), sg+uint64(g), sb+uint64(bl), sa+uint64(a), n+1
+		}
+	}
+	if n == 0 || sa == 0 {
+		return color.NRGBA{}
+	}
+	avgA, avgR, avgG, avgB := sa/n, sr/n, sg/n, sb/n
+	return color.NRGBA{
+		R: uint8(avgR * 0xffff / avgA >> 8),
+		G: uint8(avgG * 0xffff / avgA >> 8),
+		B: uint8(avgB * 0xffff / avgA >> 8),
+		A: uint8(avgA >> 8),
+	}
 }
 
 // ImageCaptureTime 从图片 EXIF 取拍摄时间（DateTimeOriginal/DateTime），无则空串。

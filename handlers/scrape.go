@@ -40,9 +40,11 @@ type ScrapeReq struct {
 type ScrapeApplyReq struct {
 	Path   string `json:"path"`
 	TmdbID int    `json:"tmdb_id"`
-	// Keep 可选：表单里**当前已经有内容**的字段，刮削一律不覆盖它们。
-	// 由前端上报，因为它才是"用户此刻看到的东西"。nil = 调用方没给（脚本/老客户端），
-	// 这时退回按存储内容判断（已有内容不覆盖）。
+	// Keep 可选：表单里**当前已经有内容**的字段，刮削一律不覆盖它们。nil = 调用方没给
+	//（脚本/老客户端），这时退回按存储内容判断（已有内容不覆盖）。
+	//
+	// 网页端现在固定传空对象（全不保留 = 整部替换）：刮削改成「只检索、点候选才写」之后，
+	// 写入这个动作本身就是人的明确选择，没有"只补空缺"的场景了（见 web/public/js/home.js）。
 	Keep *ScrapeKeep `json:"keep"`
 }
 
@@ -251,11 +253,21 @@ func ScrapeApply(c *echo.Context) error {
 	// 封面只补空缺：已经有封面就不动它（和字段同样的「不覆盖已有内容」口径）。
 	// 想换封面走「上传封面」或「FFmpeg 截图」——那两条路本来就是显式替换。
 	_, _, hasPoster := mediaExtraInfo(t.drv, t.rel)
-	// 海报失败不算整单失败：文字信息已经拿到了，封面可以改用上传/FFmpeg 截图补，
+	// 图源优先用**剧照**（backdrop，16:9 横版），没有才退回海报（poster，竖版 2:3）。
+	//
+	// 原因在裁剪这一步：封面统一是 4:3 横版 400×300，而 ResizeCoverPNG 是「等比放大铺满 +
+	// 居中裁」。竖版海报放大到铺满后是 400×600，再竖着裁到 300 —— 上下各砍掉 25%，
+	// 片名和字幕常在这两截里，观感就是"上下各截去一大截"。剧照本身是影片画面，
+	// 铺满后是 533×300，只裁掉左右各约 12.5%，高度完整，正是想要的截图观感。
+	imgPath, imgSize := m.BackdropPath, tmdb.BackdropSize
+	if imgPath == "" {
+		imgPath, imgSize = m.PosterPath, tmdb.PosterSize
+	}
+	// 图片失败不算整单失败：文字信息已经拿到了，封面可以改用上传/FFmpeg 截图补，
 	// 没道理因为一张图把已刮到的简介一起丢掉。把原因回给前端提示即可。
 	posterOK, posterErr := hasPoster, ""
 	if !hasPoster {
-		if raw, ferr := cli.FetchImage(ctx, m.PosterPath); ferr != nil {
+		if raw, ferr := cli.FetchImage(ctx, imgPath, imgSize); ferr != nil {
 			posterErr = ferr.Error()
 		} else if png, perr := mediaindex.ResizeCoverPNG(raw); perr != nil {
 			posterErr = perr.Error()

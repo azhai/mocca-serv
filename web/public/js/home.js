@@ -502,31 +502,6 @@ async function doShot(ed) {
   ed.loading = false; m.redraw();
 }
 /* ── TMDB 刮削（视频） ───────────────────────────────── */
-// pickBestCandidate 从候选里挑最可能是"这一部"的那条：优先年份与文件名对得上的。
-//
-// 同名电影多（翻拍、续集、译名撞车）时，"第一条"经常是别的年份那部 —— 盲取第一条正是
-// "刮到的电影是错的"的来源。文件名里的年份是手边最可信的线索（猜关键词时就解析出来了），
-// 所以先用它筛一遍；一条都不对再退回第一条。
-function pickBestCandidate(list, year) {
-  if (!list || !list.length) return null;
-  if (year) {
-    const hit = list.find(c => Number(c.year) === Number(year));
-    if (hit) return hit;
-  }
-  return list[0];
-}
-
-// formKeepMask 把表单里**此刻已经有内容**的字段报给后端（见后端 ScrapeKeep）。
-// 覆盖与否以表单为准而不是 .mocca：用户在表单里把某格清空，就是想让它被重新填上。
-function formKeepMask(ed) {
-  return {
-    summary: !!String(ed.summary || '').trim(),
-    director: !!String(ed.director || '').trim(),
-    cast: !!String(ed.cast || '').trim(),
-    year: !!String(ed.year || '').trim(),
-  };
-}
-
 // formSnapshot 记下"刮削前这份文件长什么样"，供候选里的「原始数据」还原。
 //
 // 为什么需要：刮削是**直接覆盖 .mocca** 的，而同名电影很容易连点错几条 —— 总得有路回到原点。
@@ -542,31 +517,35 @@ function formSnapshot(ed) {
 }
 
 // scrapeState 把这次的检索结果与"原始数据"合成一份界面状态。
-// original / keepCover 只在**首次检索**时确定，换一部时要沿用 —— 否则"原始数据"
-// 会变成"上一条候选"，封面也会被误判成"原本就有"而删不掉。
-function scrapeState(prev, picked, list, fileYear, original, res) {
+// pickedId 是当前选中的那张卡：'__raw'（原始数据）或某条候选的 TMDB id。
+// original 只在**首次检索**时确定，之后一律沿用 —— 否则"原始数据"会变成"上一条候选"。
+function scrapeState(prev, pickedId, list, fileYear, original, res) {
   prev = prev || {};
+  // keepCover：还原时要不要动封面。封面本来就是这次刮削加上去的（poster_kept 为假）就得删掉
+  // 才算回到原样；这个判定只累积不重置（一旦为假就保持为假），否则再检索一次就把
+  // "还原时该删封面"这条信息丢了，点「原始数据」会留下一张多出来的封面。
+  let keepCover = prev.keepCover !== false;
+  if (res) keepCover = keepCover && !!res.poster_kept;
   return {
-    list, pickedId: picked.id, fileYear,
+    list, pickedId, fileYear,
     original: original || prev.original || null,
-    // keepCover：还原时不要动封面。封面本来就是这次刮削加上去的话（poster_kept 为假），
-    // 还原就得把它删掉才算回到原样。apply 失败时拿不到这个信息，按"别动"处理更安全。
-    keepCover: original ? (!res || !!res.poster_kept) : prev.keepCover !== false,
+    keepCover,
   };
 }
 
 // applyCandidate 把选中的那条候选装进文件，并把结果拆进表单。
 //
-// opts.keep：表单状态 → 只补空缺（首次刮削）；`{}`（全 false）→ 整部替换（用户点了"换一部"）。
-// opts.list / opts.fileYear：挂回界面用，同名电影方便换一部（见 scrapeUI 的候选卡片）。
+// 只在用户**点了候选卡片**时调用（scrapeSearch 只检索、不写盘）：所以一律整部替换
+// （keep 传 `{}` = 全不保留），否则上一次刚填进去的资料会把新的一条全挡住。
+// opts.list / opts.fileYear：挂回界面用，同名电影方便继续换一部（见 scrapeUI 的候选卡片）。
 // opts.fallback：apply 失败时用来兜底填表单的详情（后端顺带带回的第一条）。
-// opts.original：首次刮削时传进来的"刮削前快照"；opts.scrape：换一部时沿用的上一次状态。
+// opts.scrape：沿用上一次的界面状态（「原始数据」快照与封面判定，见 scrapeState）。
 async function applyCandidate(ctx, picked, opts = {}) {
-  const { list = [], fileYear = 0, fallback = null, keep = null, original = null, scrape = null } = opts;
+  const { list = [], fileYear = 0, fallback = null, scrape = null } = opts;
   let res = null, applyErr = '';
   try {
     res = await api('/fs/scrape/apply', { method: 'POST', body: {
-      path: ctx.path, tmdb_id: picked.id, keep,
+      path: ctx.path, tmdb_id: picked.id, keep: {},
     } });
     // 只有真换了封面才动版本号：posterURL 里带着它，一改会让整页卡片的封面全部重拉一次。
     if (!res.poster_kept) coverRev++;
@@ -579,7 +558,7 @@ async function applyCandidate(ctx, picked, opts = {}) {
   const ed = state.edit;
   const got = res || fallback || picked;
   if (ed && ed.path === ctx.path) {
-    ed.scrape = scrapeState(scrape, picked, list, fileYear, original, res);
+    ed.scrape = scrapeState(scrape, picked.id, list, fileYear, 0, res);
     ed.scrapeBusy = false;
   }
 
@@ -600,33 +579,31 @@ async function applyCandidate(ctx, picked, opts = {}) {
   }
 }
 
-// scrapeSearch 刮削：检索 → 挑最可能是这一部的那条 → 装进文件并回填表单。
+// scrapeSearch 刮削第一步：**只检索**，把候选列出来，默认选中「原始数据」。
 //
-// 同名电影多，所以**不盲取第一条**：优先年份与文件名对得上的（pickBestCandidate），
-// 并把候选条留在界面上，一眼不对可以直接换一部（scrapeUI 里的候选按钮）。
-// 一条都没对上、或候选里根本没有那一部时，改上面的片名（可带年份）再刮一次。
+// 刻意不自动选一条灌进文件：同名电影（翻拍、续集、译名撞车）里猜错的概率不低，而刮削是
+// 直接覆盖 .mocca 的 —— 猜错就等于把原有资料覆盖掉。所以默认停在原样，由人点一下候选
+// 才真正写入（点击走 scrapePickAgain，整部替换）。检索本身不写盘（见后端 ScrapeSearch）。
+// 一条候选都没有、或都不是那部时，改上面的片名（可带年份）再刮一次。
 async function scrapeSearch(ed) {
   if (ed.scrapeBusy) return;
   ed.scrapeBusy = true; m.redraw();
   const ctx = { path: ed.path, kind: ed.kind, name: ed.name };
-  // 这两个都必须在 openEdit 重建编辑态**之前**取走：keep 是表单当前状态，
-  // original 是"刮削前长什么样"的快照（供候选里的「原始数据」还原）。
-  const keep = formKeepMask(ed);
+  // original 是"刮削前长什么样"的快照（供候选里的「原始数据」还原），要在重建编辑态之前取走。
   const original = formSnapshot(ed);
   try {
     const d = await api('/fs/scrape', { method: 'POST', body: {
       path: ctx.path, keyword: (ed.scrapeKey || '').trim(),
     } });
     const list = d.candidates || [];
-    const picked = pickBestCandidate(list, d.year);
-    if (!picked) {
+    if (!list.length) {
       say(`没找到「${d.keyword}」的候选，换个关键词再试`);
       ed.scrapeBusy = false; m.redraw();
       return;
     }
-    // 后端顺带带回的 detail 只对第一条有意义，故选中的就是它时才拿来兜底
-    const fallback = d.detail && d.detail.tmdb_id === picked.id ? d.detail : null;
-    await applyCandidate(ctx, picked, { list, fileYear: d.year, fallback, keep, original });
+    // 只挂候选、不动表单：默认选中「原始数据」这张卡（pickedId 见 scrapeUI 的高亮判定）
+    ed.scrape = scrapeState(ed.scrape, '__raw', list, d.year, original, null);
+    say(`找到 ${list.length} 个候选，默认保留原始数据；点候选卡片即可替换`);
   } catch (err) { say(err.message, true); }
   ed.scrapeBusy = false; m.redraw();
 }
@@ -695,8 +672,9 @@ function candTip(c) {
   return [head, meta, c.overview].filter(Boolean).join('\n');
 }
 
-// scrapePickAgain 换一部：用户明确要换成这条，所以**整部替换**（keep 传空对象 = 全不保留），
-// 而不是像首次刮削那样只补空缺 —— 否则上一次刚填进去的资料会把新的一条全挡住。
+// scrapePickAgain 换一部：用户明确点了这条候选（首次写入也走这里），所以**整部替换**
+// （applyCandidate 里 keep 传 `{}` = 全不保留），而不是只补空缺 —— 否则上一次刚填进去的
+// 资料会把新的一条全挡住。
 async function scrapePickAgain(ed, id) {
   if (ed.scrapeBusy) return;
   const sc = ed.scrape || {};
@@ -707,7 +685,7 @@ async function scrapePickAgain(ed, id) {
   try {
     // scrape: sc —— 沿用原有的「原始数据」快照与封面判定，
     // 否则换一部之后"原始"就变成"上一条候选"了。
-    await applyCandidate(ctx, picked, { list: sc.list, fileYear: sc.fileYear, keep: {}, scrape: sc });
+    await applyCandidate(ctx, picked, { list: sc.list, fileYear: sc.fileYear, scrape: sc });
   } catch (err) { say(err.message, true); }
   ed.scrapeBusy = false; m.redraw();
 }
@@ -1828,12 +1806,20 @@ const EditModal = {
     // TMDB 刮削：一个可改的检索词 + 一个按钮，点下去直接落盘并回填表单（含封面）。
     // 只给视频——TMDB 是影视库，音频/图片刮不出东西（后端也会拒）。
     //
-    // 同名电影的选择：一行三个候选，卡片上只有**封面缩略图 + 主演** —— 同名时片名一模一样，
-    // 这两样才是选出"是哪一部"的依据；其余信息（片名/年份/原名/评分/简介）全部走 hover tip
-    // （见 candTip），不占版面。点一条即**整部替换**（见 scrapePickAgain），当前生效的高亮。
+    // 同名电影的选择：每部候选占一列，列里**两张图各占一行** ——
+    // 上排是横版剧照（16:9，封面取的就是它），下排是竖版海报（2:3，带片名文字）；
+    // 下面一行是主演。同名时片名一模一样，这三样才是认出"是哪一部"的依据；
+    // 其余信息（片名/年份/原名/评分/简介）全部走 hover tip（见 candTip）。
+    // 点一条即**整部替换**（见 scrapePickAgain），当前生效的高亮 —— 两张图同属一个按钮，
+    // 点哪张都一样，不会出现"点了图却选到别的候选"。
     //
     // 第一张固定是**「原始数据」**：刮削是直接覆盖 .mocca 的，点错几条之后要靠它回到原点
     // （见 restoreOriginal）。它跟候选并排放在同一个可滚动区里，所以位置固定、一眼能看见。
+    // thumb 一张候选缩略图；cls 是 land（横版）/ port（竖版），决定这行的高度与裁法（见 CSS）。
+    const thumb = (cls, url, emptyText) => m('.cand-thumb.' + cls, url
+      ? m('img', { src: url, alt: '', loading: 'lazy',
+          onerror: ev => { ev.target.style.display = 'none'; } })
+      : m('span.ph', emptyText));
     const cards = [];
     if (ed.scrape) {
       const o = ed.scrape.original;
@@ -1852,10 +1838,8 @@ const EditModal = {
         title: candTip(c),
         onclick: () => guard(() => scrapePickAgain(ed, c.id)),
       }, [
-        m('.cand-thumb', c.poster
-          ? m('img', { src: c.poster, alt: c.title, loading: 'lazy',
-              onerror: ev => { ev.target.style.display = 'none'; } })
-          : m('span.ph', '无封面')),
+        thumb('land', c.backdrop, '无剧照'),
+        thumb('port', c.poster, '无封面'),
         m('.cand-c', (c.cast || []).slice(0, 3).join(' / ') || '（暂无主演）'),
       ])));
     }
@@ -1871,8 +1855,8 @@ const EditModal = {
             }),
             m('button.btn.ghost', {
               disabled: ed.scrapeBusy,
-              title: '用 TMDB 检索并把匹配到的简介/导演/年份/主演与封面写入本文件；' +
-                '同名电影在下方的候选里换，仍不对就改上面的片名（带年份更准）再刮',
+              title: '用 TMDB 检索候选（只检索，不写盘；默认仍用原始数据）；' +
+                '点下方候选卡片才写入本文件，仍不对就改上面的片名（带年份更准）再刮',
               onclick: () => guard(() => scrapeSearch(ed)),
             }, ed.scrapeBusy ? '处理中…' : 'TMDB 刮削'),
           ]),
@@ -1894,7 +1878,6 @@ const EditModal = {
       ];
     } else { // 视频
       fields = [
-        scrapeUI,
         m('.fld-row', [
           field('导演', 'director'),
           // 年份刻意不用 type="number"：它带上下箭头、还会被浏览器当数字框做校验，
@@ -1912,6 +1895,10 @@ const EditModal = {
         m('button.iconbtn.close-edit', { title: '关闭', onclick: () => { state.edit = null; } },
           m('svg', { viewBox: '0 0 24 24' }, m('path', { d: I.close }))),
         coverUI,
+        // 刮削紧跟封面、在文件名**之上**：它是"填表"的起点（检索 → 选中 → 自动填好导演/年份/主演/简介），
+        // 摆在表单最上方才顺手；原先放在文件名后面，长表单里一滚就看不见了。
+        // 检索到的候选也在这里展开：一行横版剧照、一行竖版海报（见上面的 thumb）。
+        scrapeUI,
         field('文件名', 'name', { placeholder: '不含扩展名' }),
         ...fields,
         // 最下面一行：最左边删除、最右边保存（删除已含二次确认）

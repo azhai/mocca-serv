@@ -549,15 +549,15 @@ button.ghost.danger:hover:not([disabled]) { background: rgba(179, 38, 30, .08); 
 }
 .scrape button.btn.ghost:hover:not([disabled]) { background: var(--md-surface-container-high); }
 .scrape button.btn.ghost[disabled] { opacity: .55; cursor: not-allowed; }
-/* 同名电影的选择：**一行放下全部**（「原始数据」+ 三个候选），卡片上只放
-   **封面缩略图 + 主演**（同名时片名一样，这两样才是认出"是哪一部"的依据）；
-   其余信息走 hover tip（原生 title，见 candTip）。
+/* 同名电影的选择：**一行放下全部**（「原始数据」+ 三个候选）。每部候选是一列，
+   列里**两张图各占一行**：上排横版剧照（16:9）、下排竖版海报（2:3），最下面一行是主演
+   （同名时片名一样，这三样才是认出"是哪一部"的依据）；其余信息走 hover tip（见 candTip）。
    第一列是「原始数据」，压到只剩一条竖排文字（36px），把宽度全省给候选。
-   行高固定 128px（是之前 384px 的 1/3），整块给固定高度 + 内部滚动。 */
+   行高交给内容决定（两行图 + 一行字），整块给固定高度 + 内部滚动。 */
 .scrape .cands {
   display: grid; grid-template-columns: 36px repeat(3, minmax(0, 1fr));
-  grid-auto-rows: 128px; gap: 8px;
-  margin-top: 8px; max-height: 136px; overflow-y: auto; padding-right: 2px;
+  grid-auto-rows: auto; gap: 8px;
+  margin-top: 8px; max-height: 236px; overflow-y: auto; padding-right: 2px;
 }
 /* 「原始数据」卡片：窄条 + 虚线，竖排文字（横着写会挤成一团），点它还原到刮削前 */
 .scrape button.cand.raw {
@@ -579,18 +579,19 @@ button.ghost.danger:hover:not([disabled]) { background: rgba(179, 38, 30, .08); 
 .scrape button.cand[disabled] { opacity: .55; cursor: not-allowed; }
 /* 当前生效的那条：主色描边（inset 阴影让描边不撑开尺寸） */
 .scrape button.cand.on { border-color: var(--md-primary); box-shadow: inset 0 0 0 1px var(--md-primary); }
-/* 缩略图区占满卡片剩余高度（flex:1），图**铺满列宽**：
-   竖版海报按宽度铺满后一定比这个区高，多出来的部分由 cover **上下对称截掉**
-   （object-position 默认 center）。用 contain 会按高度缩、两侧留空，"宽度没铺满"。
-   cover 只裁不拉伸，海报不会变形。 */
+/* 缩略图两行：横版（剧照）与竖版（海报）各一行。
+   裁法刻意不同：横版按 16:9 铺满列宽、只裁左右（与封面落盘同一个口径，所见即所得）；
+   竖版按原比例缩到固定高度居中、**完整显示不裁** —— 竖版海报若也按横框裁，
+   上下两截（片名、字幕）会被切掉，正是"封面看着少一块"的来源。 */
 .scrape .cand-thumb {
-  display: flex; flex: 1; align-items: center; justify-content: center;
-  width: 100%; min-height: 0; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; overflow: hidden;
 }
-.scrape .cand-thumb img {
-  width: 100%; height: 100%; object-fit: cover;
-  border-radius: 4px; display: block;
-}
+.scrape .cand-thumb.land { aspect-ratio: 16 / 9; }
+.scrape .cand-thumb.port { height: 84px; }
+.scrape .cand-thumb img { border-radius: 4px; display: block; }
+.scrape .cand-thumb.land img { width: 100%; height: 100%; object-fit: cover; }
+.scrape .cand-thumb.port img { width: auto; max-width: 100%; height: 100%; object-fit: contain; }
 .scrape .cand-thumb .ph { font-size: 11px; color: var(--md-on-surface-variant); }
 .scrape .cand-c {
   font-size: 11px; color: var(--md-on-surface-variant); line-height: 1.35;

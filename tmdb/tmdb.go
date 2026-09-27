@@ -40,6 +40,10 @@ const DefaultLang = "zh-CN"
 // PosterSize 海报取 w500：宽 500 已远超封面落盘的 400×300，再大只是浪费带宽。
 const PosterSize = "w500"
 
+// BackdropSize 剧照取 w780。剧照是 16:9 横版，而封面目标 4:3 横版要从它身上裁，
+// 所以宽度得留出余量：w780 铺满 400×300 时是 533×300，裁掉左右各约 12.5%，清晰度足够。
+const BackdropSize = "w780"
+
 // MaxCast 主演最多取几位。卡片上一行放不下太多，五位是够用又不挤的口径。
 const MaxCast = 5
 
@@ -71,13 +75,17 @@ type person struct {
 
 // Candidate 检索结果里的一条，够前端列出来让人挑。
 type Candidate struct {
-	ID            int     `json:"id"`
-	Title         string  `json:"title"`
-	OriginalTitle string  `json:"original_title,omitempty"`
-	Year          int     `json:"year,omitempty"`
-	Overview      string  `json:"overview,omitempty"`
-	Poster        string  `json:"poster,omitempty"` // 完整海报地址，可直接 <img src>
-	VoteAverage   float64 `json:"vote_average,omitempty"`
+	ID            int    `json:"id"`
+	Title         string `json:"title"`
+	OriginalTitle string `json:"original_title,omitempty"`
+	Year          int    `json:"year,omitempty"`
+	Overview      string `json:"overview,omitempty"`
+	// Poster 竖版 2:3 海报（带片名文字）；Backdrop 16:9 横版剧照（影片画面）。
+	// 两者都是完整地址、可直接 <img src>，前端候选卡片按「横版一行 + 竖版一行」并排展示，
+	// 让人一眼比出哪张更像这部片，也顺带预告封面会取哪张（封面优先用剧照，见 handlers.ScrapeApply）。
+	Poster      string  `json:"poster,omitempty"`
+	Backdrop    string  `json:"backdrop,omitempty"`
+	VoteAverage float64 `json:"vote_average,omitempty"`
 	// Director / Cast 不是 /search/movie 的字段，是详情接口才有的。
 	// 检索接口（handlers.ScrapeSearch）会给前几条候选各补一次详情填上它们 ——
 	// 同名电影（翻拍、续集、译名撞车）光看片名和年份分不清是哪一部，得靠主演来认。
@@ -101,9 +109,14 @@ type Movie struct {
 	Language      string   `json:"language,omitempty"`
 	Genres        []string `json:"genres,omitempty"`
 	VoteAverage   float64  `json:"vote_average,omitempty"`
-	// Poster 完整地址供展示；PosterPath 是 TMDB 的相对路径，下载海报时用。
-	Poster     string `json:"poster,omitempty"`
-	PosterPath string `json:"-"`
+	// Poster 完整地址供展示；PosterPath / BackdropPath 是 TMDB 的相对路径，下载图片时用。
+	//
+	// 两者形态不同：PosterPath 是竖版 2:3 海报（带片名文字，适合列候选让人认），
+	// BackdropPath 是 16:9 横版剧照（就是影片画面，适合当封面——见 handlers.ScrapeApply）。
+	Poster       string `json:"poster,omitempty"`
+	PosterPath   string `json:"-"`
+	Backdrop     string `json:"backdrop,omitempty"`
+	BackdropPath string `json:"-"`
 }
 
 // Client 一个已配好密钥与语言的调用端。零值不可用，用 New 构造。
@@ -235,6 +248,7 @@ func (c *Client) search(ctx context.Context, query string, year int) ([]Candidat
 			OriginalTitle string  `json:"original_title"`
 			Overview      string  `json:"overview"`
 			PosterPath    string  `json:"poster_path"`
+			BackdropPath  string  `json:"backdrop_path"`
 			ReleaseDate   string  `json:"release_date"`
 			VoteAverage   float64 `json:"vote_average"`
 		} `json:"results"`
@@ -247,7 +261,10 @@ func (c *Client) search(ctx context.Context, query string, year int) ([]Candidat
 		out = append(out, Candidate{
 			ID: r.ID, Title: r.Title, OriginalTitle: r.OriginalTitle,
 			Year: yearOf(r.ReleaseDate), Overview: r.Overview,
-			Poster: c.PosterURL(r.PosterPath), VoteAverage: r.VoteAverage,
+			// 海报与剧照各取自己的尺寸档：两者形态不同，取错档会糊
+			Poster:      c.PosterURL(r.PosterPath),
+			Backdrop:    c.PosterURL(r.BackdropPath, BackdropSize),
+			VoteAverage: r.VoteAverage,
 		})
 	}
 	return out, nil
@@ -266,6 +283,7 @@ func (c *Client) Movie(ctx context.Context, id int) (*Movie, error) {
 		OriginalTitle       string  `json:"original_title"`
 		Overview            string  `json:"overview"`
 		PosterPath          string  `json:"poster_path"`
+		BackdropPath        string  `json:"backdrop_path"`
 		ReleaseDate         string  `json:"release_date"`
 		Runtime             int     `json:"runtime"`
 		VoteAverage         float64 `json:"vote_average"`
@@ -297,9 +315,11 @@ func (c *Client) Movie(ctx context.Context, id int) (*Movie, error) {
 		ID: resp.ID, Title: resp.Title, OriginalTitle: resp.OriginalTitle,
 		Year: yearOf(resp.ReleaseDate), Released: resp.ReleaseDate,
 		Runtime: resp.Runtime, Overview: resp.Overview,
-		VoteAverage: resp.VoteAverage,
-		PosterPath:  resp.PosterPath,
-		Poster:      c.PosterURL(resp.PosterPath),
+		VoteAverage:  resp.VoteAverage,
+		PosterPath:   resp.PosterPath,
+		Poster:       c.PosterURL(resp.PosterPath),
+		BackdropPath: resp.BackdropPath,
+		Backdrop:     c.PosterURL(resp.BackdropPath, BackdropSize),
 		// 导演只留一位；出品方/地区/语言各留少量，避免一格塞满
 		Director: joinNames(directorNames(crew), "、", MaxDirector),
 		Cast:     castNames(cast),
@@ -327,7 +347,8 @@ func (c *Client) movieCredits(ctx context.Context, id int) (cast, crew []person,
 	return resp.Cast, resp.Crew, nil
 }
 
-// PosterURL 把 TMDB 的相对海报路径拼成完整地址；路径为空返回空串。
+// PosterURL 把 TMDB 的相对图片路径拼成完整地址；路径为空返回空串。
+// 名字沿用 poster，但海报与剧照（backdrop）都是同一套图片服务，靠 size 区分取哪个尺寸。
 func (c *Client) PosterURL(posterPath string, size ...string) string {
 	posterPath = strings.TrimSpace(posterPath)
 	if posterPath == "" {
@@ -340,11 +361,12 @@ func (c *Client) PosterURL(posterPath string, size ...string) string {
 	return strings.TrimRight(ImageBase, "/") + "/" + sz + "/" + strings.TrimPrefix(posterPath, "/")
 }
 
-// FetchImage 下载海报原图字节。用于落盘成 .mocca 封面（再由调用方统一裁剪编码）。
-func (c *Client) FetchImage(ctx context.Context, posterPath string) ([]byte, error) {
-	imgURL := c.PosterURL(posterPath)
+// FetchImage 下载图片原图字节（海报或剧照）。用于落盘成 .mocca 封面（再由调用方统一裁剪编码）。
+// size 留空用 PosterSize；取剧照时传 BackdropSize。
+func (c *Client) FetchImage(ctx context.Context, posterPath string, size ...string) ([]byte, error) {
+	imgURL := c.PosterURL(posterPath, size...)
 	if imgURL == "" {
-		return nil, errors.New("该条目没有海报")
+		return nil, errors.New("该条目没有可用图片")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imgURL, nil)
 	if err != nil {
@@ -352,18 +374,18 @@ func (c *Client) FetchImage(ctx context.Context, posterPath string) ([]byte, err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, errors.Errorf("下载海报失败（%s）: %s", c.proxyNote(), redactKey(err.Error(), c.apiKey))
+		return nil, errors.Errorf("下载图片失败（%s）: %s", c.proxyNote(), redactKey(err.Error(), c.apiKey))
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.Errorf("下载海报失败：HTTP %d", resp.StatusCode)
+		return nil, errors.Errorf("下载图片失败：HTTP %d", resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes))
 	if err != nil {
-		return nil, errors.Wrap(err, "读取海报失败")
+		return nil, errors.Wrap(err, "读取图片失败")
 	}
 	if len(data) == 0 {
-		return nil, errors.New("海报内容为空")
+		return nil, errors.New("图片内容为空")
 	}
 	return data, nil
 }

@@ -81,7 +81,7 @@ func fakeTMDBAPI(t *testing.T) *int {
 				return
 			}
 			w.Write([]byte(`{"results":[{"id":157336,"title":"星际穿越","original_title":"Interstellar",
-				"overview":"地球濒临毁灭，一群探险者穿越虫洞。","poster_path":"/abc.jpg",
+				"overview":"地球濒临毁灭，一群探险者穿越虫洞。","poster_path":"/abc.jpg","backdrop_path":"/bd.jpg",
 				"release_date":"2014-11-05","vote_average":8.4}]}`))
 		case "/movie/157336":
 			w.Write([]byte(`{"id":157336,"title":"星际穿越","original_title":"Interstellar",
@@ -151,6 +151,10 @@ func TestScrapeSearchGuessesKeywordAndYear(t *testing.T) {
 	if p, _ := first["poster"].(string); !strings.HasSuffix(p, "/w500/abc.jpg") {
 		t.Errorf("候选海报地址 = %q", p)
 	}
+	// 候选还要带剧照（横版）：前端候选区是「横版一行 + 竖版一行」，横版那行的图源就是它
+	if b, _ := first["backdrop"].(string); !strings.HasSuffix(b, "/w780/bd.jpg") {
+		t.Errorf("候选剧照地址 = %q，want 以 /w780/bd.jpg 结尾", b)
+	}
 	// 候选必须带导演/主演：同名电影的选择卡片上只有封面和主演，而 /search/movie 不返回
 	// 演职员 —— 少了这两个字段，前端就只能靠片名判断，同名时必然选错。
 	if first["director"] != "克里斯托弗·诺兰" {
@@ -216,6 +220,125 @@ func TestScrapeSplitsKeywordYear(t *testing.T) {
 	d, _ := resp["data"].(map[string]any)
 	if d["keyword"] != "无间道" || d["year"] != float64(2002) {
 		t.Errorf("回包关键词/年份不符: keyword=%v year=%v", d["keyword"], d["year"])
+	}
+}
+
+// fakeSolidJPEG 单色 JPEG：用来区分封面到底取自哪张图（剧照还是海报）。
+// 两张图颜色不同，落盘后看中心像素就知道用了哪张。
+func fakeSolidJPEG(t *testing.T, c color.RGBA, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, c)
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestScrapeCoverPrefersBackdrop 封面必须优先取**剧照**（backdrop，16:9 横版），
+// 而不是竖版海报。
+//
+// 起因：封面统一是 4:3 横版 400×300，裁剪是「等比放大铺满 + 居中裁」。竖版海报（2:3）
+// 铺满后是 400×600，再竖着裁到 300 —— 上下各砍掉 25%，用户看到的正是"上下各截去一大截"。
+// 剧照本身就是影片画面，铺满后 533×300，只裁掉左右各约 12.5%，高度完整。
+func TestScrapeCoverPrefersBackdrop(t *testing.T) {
+	e := newApp(t)
+	root := contentRoot(t)
+	addStorage(t, "/media", "Local", root)
+	hash := seedVideo(t, root, "Interstellar.2014.mkv", "video-content")
+
+	backdrop := fakeSolidJPEG(t, color.RGBA{B: 255, A: 255}, 320, 180) // 蓝色剧照（16:9）
+	poster := fakeSolidJPEG(t, color.RGBA{R: 255, A: 255}, 200, 300)   // 红色海报（2:3）
+	var gotBackdrop bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/movie/157336":
+			w.Write([]byte(`{"id":157336,"title":"星际穿越","release_date":"2014-11-05",
+				"overview":"简介","poster_path":"/abc.jpg","backdrop_path":"/bd.jpg"}`))
+		case strings.HasSuffix(r.URL.Path, "/bd.jpg"):
+			gotBackdrop = true
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.Write(backdrop)
+		default:
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.Write(poster)
+		}
+	}))
+	defer srv.Close()
+	oldBase, oldImg := tmdb.BaseURL, tmdb.ImageBase
+	tmdb.BaseURL, tmdb.ImageBase = srv.URL, srv.URL+"/img"
+	defer func() { tmdb.BaseURL, tmdb.ImageBase = oldBase, oldImg }()
+	config.Cfg.TmdbAPIKey, config.Cfg.TmdbProxy = "v3key", ""
+	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
+
+	code, resp := call(t, e, http.MethodPost, "/api/fs/scrape/apply",
+		`{"path":"/media/Interstellar.2014.mkv","tmdb_id":157336}`, admin)
+	if code != 200 {
+		t.Fatalf("刮削应成功，got %d msg=%v", code, resp["message"])
+	}
+	if !gotBackdrop {
+		t.Fatal("封面应优先取剧照（backdrop），实际没去下载它")
+	}
+
+	pf, err := os.Open(tmdbMetaPath(t, root, hash, true))
+	if err != nil {
+		t.Fatalf("读封面失败: %v", err)
+	}
+	defer func() { _ = pf.Close() }()
+	img, _, err := image.Decode(pf)
+	if err != nil {
+		t.Fatalf("封面不是可解码图片: %v", err)
+	}
+	if b := img.Bounds(); b.Dx() != mediaindex.CoverWidth || b.Dy() != mediaindex.CoverHeight {
+		t.Fatalf("封面尺寸 = %dx%d，want %dx%d", b.Dx(), b.Dy(), mediaindex.CoverWidth, mediaindex.CoverHeight)
+	}
+	// 中心像素必须是剧照那个蓝色；若取了海报会是红色
+	r, g, b, _ := img.At(mediaindex.CoverWidth/2, mediaindex.CoverHeight/2).RGBA()
+	if b <= r || b <= g {
+		t.Errorf("封面中心像素 = (%d,%d,%d)，偏红说明取的是竖版海报而不是剧照", r>>8, g>>8, b>>8)
+	}
+}
+
+// TestScrapeCoverFallsBackToPoster 没有剧照时必须退回海报：不能因为缺 backdrop 就不给封面。
+func TestScrapeCoverFallsBackToPoster(t *testing.T) {
+	e := newApp(t)
+	root := contentRoot(t)
+	addStorage(t, "/media", "Local", root)
+	hash := seedVideo(t, root, "Interstellar.2014.mkv", "video-content")
+
+	poster := fakeSolidJPEG(t, color.RGBA{R: 255, A: 255}, 200, 300)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/movie/157336" {
+			// 只有海报，没有 backdrop_path
+			w.Write([]byte(`{"id":157336,"title":"星际穿越","release_date":"2014-11-05",
+				"overview":"简介","poster_path":"/abc.jpg"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(poster)
+	}))
+	defer srv.Close()
+	oldBase, oldImg := tmdb.BaseURL, tmdb.ImageBase
+	tmdb.BaseURL, tmdb.ImageBase = srv.URL, srv.URL+"/img"
+	defer func() { tmdb.BaseURL, tmdb.ImageBase = oldBase, oldImg }()
+	config.Cfg.TmdbAPIKey, config.Cfg.TmdbProxy = "v3key", ""
+	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
+
+	code, resp := call(t, e, http.MethodPost, "/api/fs/scrape/apply",
+		`{"path":"/media/Interstellar.2014.mkv","tmdb_id":157336}`, admin)
+	if code != 200 {
+		t.Fatalf("刮削应成功，got %d msg=%v", code, resp["message"])
+	}
+	if d, _ := resp["data"].(map[string]any); d["poster"] != true {
+		t.Fatalf("缺剧照时应退回海报并成功落盘: %v", d)
+	}
+	if _, err := os.Stat(tmdbMetaPath(t, root, hash, true)); err != nil {
+		t.Errorf("封面应已落盘: %v", err)
 	}
 }
 

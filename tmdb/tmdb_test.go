@@ -173,13 +173,15 @@ func fakeTMDB(t *testing.T, wantBearer bool) (*httptest.Server, *[]string) {
 				return
 			}
 			w.Write([]byte(`{"results":[{"id":157336,"title":"星际穿越","original_title":"Interstellar",
-				"overview":"地球濒临毁灭。","poster_path":"/abc.jpg","release_date":"2014-11-05","vote_average":8.4}]}`))
+				"overview":"地球濒临毁灭。","poster_path":"/abc.jpg","backdrop_path":"/bd.jpg",
+				"release_date":"2014-11-05","vote_average":8.4}]}`))
 		case r.URL.Path == "/movie/157336":
 			if got := r.URL.Query().Get("append_to_response"); got != "credits" {
 				t.Errorf("append_to_response = %q，want credits", got)
 			}
 			w.Write([]byte(`{"id":157336,"title":"星际穿越","original_title":"Interstellar",
-				"overview":"地球濒临毁灭。","poster_path":"/abc.jpg","release_date":"2014-11-05",
+				"overview":"地球濒临毁灭。","poster_path":"/abc.jpg","backdrop_path":"/bd.jpg",
+				"release_date":"2014-11-05",
 				"runtime":169,"vote_average":8.4,
 				"genres":[{"name":"冒险"}],"production_companies":[{"name":"Legendary Pictures"}],
 				"production_countries":[{"name":"美国"}],"spoken_languages":[{"name":"英语"}],
@@ -218,6 +220,11 @@ func TestClientSearchFallsBackWithoutYear(t *testing.T) {
 	if !strings.HasSuffix(got.Poster, "/w500/abc.jpg") {
 		t.Errorf("海报地址 = %q，want 以 /w500/abc.jpg 结尾", got.Poster)
 	}
+	// 候选也要带剧照：前端候选区是「横版一行 + 竖版一行」，横版那行的图源就是它，
+	// 少了这个字段前端只能空着一行。
+	if !strings.HasSuffix(got.Backdrop, "/w780/bd.jpg") {
+		t.Errorf("剧照地址 = %q，want 以 /w780/bd.jpg 结尾", got.Backdrop)
+	}
 	// 带年份一次、不带年份一次：证明「查不到就去掉年份重查」
 	if len(*seen) != 2 {
 		t.Errorf("应请求两次检索，got %d 次: %v", len(*seen), *seen)
@@ -249,6 +256,14 @@ func TestClientMovieMapsFields(t *testing.T) {
 	if m.PosterPath != "/abc.jpg" {
 		t.Errorf("PosterPath = %q，want /abc.jpg（下载海报要用它）", m.PosterPath)
 	}
+	// 剧照要单独带出来：封面优先用它（16:9 横版裁成 4:3 只切左右各约 12.5%，
+	// 而竖版海报会被上下砍掉一半 —— 见 handlers.ScrapeApply）
+	if m.BackdropPath != "/bd.jpg" {
+		t.Errorf("BackdropPath = %q，want /bd.jpg", m.BackdropPath)
+	}
+	if !strings.HasSuffix(m.Backdrop, "/w780/bd.jpg") {
+		t.Errorf("剧照地址 = %q，want 以 /w780/bd.jpg 结尾（剧照另有尺寸档）", m.Backdrop)
+	}
 
 	// 海报下载：假服务把任何非 API 路径都当图片
 	raw, err := c.FetchImage(context.Background(), m.PosterPath)
@@ -257,6 +272,10 @@ func TestClientMovieMapsFields(t *testing.T) {
 	}
 	if string(raw) != "fake-image-bytes" {
 		t.Errorf("海报字节 = %q", raw)
+	}
+	// 剧照下载要按 BackdropSize 拼地址（取错尺寸就拿不到图）
+	if _, err := c.FetchImage(context.Background(), m.BackdropPath, BackdropSize); err != nil {
+		t.Fatalf("下载剧照失败: %v", err)
 	}
 }
 
