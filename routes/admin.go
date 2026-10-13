@@ -48,6 +48,8 @@ func SetupAdminRoutes(e *echo.Echo) {
 	admin.POST("/fs/scrape/apply", handlers.ScrapeApply)
 	// 目录密码：给父目录设一次即可保护整棵子树
 	admin.POST("/folder/password", handlers.SetFolderPassword)
+	// 哪些目录直接设过密码（只回路径）：后台目录树一次请求把锁标全
+	admin.GET("/folder/passwords", handlers.ListFolderPasswords)
 	// 全局选项：后台开关（是否开放注册、游客可浏览、文件监控等）
 	admin.GET("/setting/list", handlers.ListSettings)
 	admin.POST("/setting/update", handlers.UpdateSetting)

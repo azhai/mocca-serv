@@ -36,6 +36,10 @@ type ListReq struct {
 	Password string `json:"password"`
 	Page     int    `json:"page"`
 	PerPage  int    `json:"per_page"`
+	// HLS 让服务端顺带探测「这一层哪些视频已经有旁路清单」，并回在条目的 hls 字段上。
+	// 默认关：探测要多一次 readdir + 若干部 Stat，而只有管理后台需要这个信息，
+	// 不该让 APP 的列目录白付这份读成本。
+	HLS bool `json:"hls"`
 }
 
 // GetReq 取详情请求。
@@ -62,6 +66,10 @@ type MediaObj struct {
 	// Sign 受保护路径的签名。当前用「目录密码 + 令牌」保护，
 	// 故恒为空；保留字段是为了让 APP 的 `sign` 解析路径始终有值可选。
 	Sign string `json:"sign"`
+	// HLS 仅当请求带了 `"hls": true` 时填充：这个视频已有 `<目录>/.hls/<文件名>/index.m3u8`，
+	// 可能是本服务切的，也可能是外部工具（`tools/gen_hls.sh`）或换机时带过来的。
+	// 客户端据此**不再提供切分入口**（重复切既多余又会覆盖已有分片）。
+	HLS bool `json:"hls,omitempty"`
 	// SHA1 媒体文件内容指纹，来自所在目录的 .index.jsonl（见 mediaindex）。
 	// 没有索引文件或该文件未入列则为空；前端据此拼 .mocca 海报图地址。
 	SHA1 string `json:"sha1,omitempty"`
@@ -346,7 +354,7 @@ func FsList(c *echo.Context) error {
 		return helpers.Fail(c, helpers.CodeForbidden, err.Error())
 	}
 
-	objs, total, err := listDir(models.NormalizeMountPath(scoped), req.Page, req.PerPage)
+	objs, total, err := listDir(models.NormalizeMountPath(scoped), req.Page, req.PerPage, req.HLS)
 	if err != nil {
 		return helpers.Fail(c, helpers.CodeNotFound, err.Error())
 	}
@@ -364,15 +372,59 @@ func FsList(c *echo.Context) error {
 // 传入 page/perPage（>=1）时按 .index.jsonl 行区间返回**仅媒体**的分页页（网格用）：
 // 子目录/文本不进分页，靠左侧目录树+面包屑导航；返回的 total 为该层媒体总数。
 // 否则返回旧的整目录列表（含子目录/文本，兼容列表视图）。
-func listDir(dir string, page, perPage int) ([]MediaObj, int, error) {
+// wantHLS 为真时逐层探一次旁路清单（见 hlsCutNames）。
+func listDir(dir string, page, perPage int, wantHLS bool) ([]MediaObj, int, error) {
 	if page >= 1 && perPage >= 1 {
-		return listDirPages(dir, page, perPage)
+		return listDirPages(dir, page, perPage, wantHLS)
 	}
-	return listDirFull(dir)
+	return listDirFull(dir, wantHLS)
+}
+
+// hlsCutNames 探这一层有哪些视频已经有旁路 HLS 清单：一次 readdir `<目录>/.hls`，
+// 再对里面每个子目录 Stat 一次清单文件。返回集以**视频文件名**为键（就是约定的目录名）。
+//
+// 为什么不是「每个视频各 Stat 一次」：SMB 上一次 Stat 就是一个网络往返，
+// 一个目录几百部片子会把列目录拖成秒级；readdir 一次拿齐候选，只对候选复核。
+// 为什么不把结果记进 .index.jsonl / .mocca：清单本身就是磁盘上的事实，再抄一份迟早会漂移
+// —— 增量索引「没变就沿用旧行」正好会把 flag 停在切分前的 false。
+//
+// 探不到就当 nil（没有 .hls 目录 = 这一层谁都没切过），不报错：列目录不该因为旁路清单读不了而失败。
+func hlsCutNames(drv drivers.Driver, dirRel string) map[string]bool {
+	base := strings.TrimSuffix(dirRel, "/") + "/" + mediaindex.HLSDirName
+	entries, err := drv.List(base)
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if !e.IsDir {
+			continue // 只认 <目录>/.hls/<完整文件名>/index.m3u8 这一种约定布局
+		}
+		playlist := base + "/" + e.Name + "/" + mediaindex.HLSPlaylistName
+		if _, serr := drv.Stat(playlist); serr != nil {
+			continue // 建了目录但没有清单（切到一半就失败）：不算已切分，还允许重切
+		}
+		out[e.Name] = true
+	}
+	return out
+}
+
+// hlsCutForDir 给整目录列表用：自己开一次驱动去探。虚拟层（不在任何挂载点里）没得可探。
+func hlsCutForDir(dir string) map[string]bool {
+	st, rel, err := resolveStorageStrict(dir)
+	if err != nil {
+		return nil
+	}
+	drv, err := drivers.Open(st)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = drv.Close() }()
+	return hlsCutNames(drv, rel)
 }
 
 // listDirPages 分页列表：只列媒体，按 .index.jsonl 行区间切，逐条读 .mocca 简介。
-func listDirPages(dir string, page, perPage int) ([]MediaObj, int, error) {
+func listDirPages(dir string, page, perPage int, wantHLS bool) ([]MediaObj, int, error) {
 	st, rel, err := resolveStorageStrict(dir)
 	if err != nil {
 		return nil, 0, err
@@ -406,6 +458,10 @@ func listDirPages(dir string, page, perPage int) ([]MediaObj, int, error) {
 	}
 
 	out := make([]MediaObj, 0, len(rows))
+	var cut map[string]bool
+	if wantHLS {
+		cut = hlsCutNames(drv, rel)
+	}
 	for _, r := range rows {
 		e, ok := names[r.Name]
 		if !ok {
@@ -415,6 +471,7 @@ func listDirPages(dir string, page, perPage int) ([]MediaObj, int, error) {
 			Name: e.Name, Size: e.Size, IsDir: false,
 			Modified: e.Modified.Format(time.RFC3339),
 			Type:     objType(e.Name, false), SHA1: r.SHA1,
+			HLS: cut[e.Name],
 		}
 		if sd, serr := readSummaryJSON(drv, r.SHA1); serr == nil && sd != nil {
 			o.Summary = sd.Summary
@@ -428,7 +485,7 @@ func listDirPages(dir string, page, perPage int) ([]MediaObj, int, error) {
 }
 
 // listDirFull 完整列表：挂载点 + 排序后的真实条目（含子目录/文本）。
-func listDirFull(dir string) ([]MediaObj, int, error) {
+func listDirFull(dir string, wantHLS bool) ([]MediaObj, int, error) {
 	// 先读真实条目，才能知道这一层哪些名字会与挂载点重名
 	entries, err := realEntries(dir, len(models.MountChildren(dir)) > 0)
 	if err != nil {
@@ -460,6 +517,10 @@ func listDirFull(dir string) ([]MediaObj, int, error) {
 
 	rest := make([]MediaObj, 0, len(entries))
 	shas := dirSHA1s(dir)
+	var cut map[string]bool
+	if wantHLS {
+		cut = hlsCutForDir(dir)
+	}
 	for _, e := range entries {
 		rest = append(rest, MediaObj{
 			Name:     e.Name,
@@ -468,6 +529,8 @@ func listDirFull(dir string) ([]MediaObj, int, error) {
 			Modified: e.Modified.Format(time.RFC3339),
 			Type:     objType(e.Name, e.IsDir),
 			SHA1:     shas[e.Name],
+			// 只对文件标：同名目录不是「切过的视频」
+			HLS: !e.IsDir && cut[e.Name],
 		})
 	}
 	sortObjs(rest)

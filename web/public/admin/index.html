@@ -10,8 +10,11 @@
 <link rel="apple-touch-icon" href="/logo.png" />
 <meta name="theme-color" content="#FEF7FF" />
 <link rel="stylesheet" href="/css/styles.css" />
+<!-- 后台专属样式（目录树/图标按钮/媒体列表）：与浏览应用共用的 M3 令牌仍在 styles.css，
+     这一份只在 /admin/ 下引用，浏览端不会因此变大。 -->
+<link rel="stylesheet" href="/css/admin.css" />
 </head>
-<body>
+<body class="admin">
 <div class="wrap" id="app"></div>
 
 <!-- 依赖随二进制一起分发：脚本都在 /js/ 下，不走 CDN。

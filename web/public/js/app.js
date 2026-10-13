@@ -1,59 +1,25 @@
-// 管理后台前端（挂 /admin/）。由 admin/index.html 以 <script type="module" src="/js/app.js"> 加载。
+// 管理后台前端外壳（挂 /admin/）。由 admin/index.html 以 <script type="module" src="/js/app.js"> 加载。
 //
 // mithril 改为走本地 ./mithril.js：后台要在局域网 http（非安全上下文）
 // 下打开，不能依赖 CDN —— 断网或 CDN 挂掉就等于白屏。
-import m from './mithril.js';
-
-// 与服务端约定一致：口令先做静态哈希再传输。实现放在 static-hash.js，
-// 因为浏览应用（home.js）要用同一份哈希 —— 两个副本迟早会算出不同的值。
-import { staticHash } from './static-hash.js';
-
-const state = {
-  token: localStorage.getItem('mocca_token') || '',
-  me: null,
-  base: location.origin + '/api',
-  page: 'storages',
-  toast: '', toastErr: false,
-  login: { user: '', pwd: '' },
-  storages: [], storageForm: null,
-  scanList: null, scanning: false,
-  users: [], userForm: null,
-  settings: [],
-  folder: { path: '/media/', pwd: '' },
-  upload: { dir: '/', files: [], busy: false },
-  // 视频切分（旁路 HLS）：sel 以文件路径为键，便于多选
-  hls: { path: '/media/', files: [], sel: {}, busy: false, listed: false },
-};
-
-function say(msg, isErr = false) { state.toast = msg; state.toastErr = isErr; m.redraw(); }
-
-// 统一信封：业务错误也返回 HTTP 200，只看 code
-async function api(path, { method = 'GET', body, token = state.token } = {}) {
-  const headers = {};
-  if (token) headers['Authorization'] = token;
-  if (body && typeof body === 'object' && !(body instanceof FormData)) {
-    headers['Content-Type'] = 'application/json';
-    body = JSON.stringify(body);
-  }
-  const env = await (await fetch(state.base + path, { method, headers, body })).json();
-  if (env.code !== 200) throw new Error(env.message || '请求失败');
-  return env.data;
-}
-
-// 统一收口异步操作：捕获错误，并在结束后补一次重绘。
 //
-// 这一句 m.redraw() 是必需的：这里用的是 fetch，而 mithril 只会自动重绘
-// m.request —— fetch 的 promise 落定不会触发重绘。少了它，异步拿到数据后
-// 界面不刷新，表现为「登录成功要点两次才跳转」（第二次点击才顺带触发重绘）。
-async function guard(fn) {
-  try {
-    await fn();
-  } catch (e) {
-    say(e.message, true);
-  } finally {
-    m.redraw();
-  }
-}
+// 模块划分（本轮重构：Tab 收敛为 用户/挂载点/目录/媒体/设置）：
+//   - js/admin-core.js  共享 state、接口封装、目录树、上传、目录密码（目录/媒体两个 Tab 必须看同一个选中目录）
+//   - js/admin-dirs.js  目录 Tab 与 媒体 Tab：目录级维护 + 文件级操作 + 上传
+//   - js/app.js（本文件）外壳与登录，以及 用户 / 挂载点 / 设置 三个面板
+// 原来的 目录密码 / 上传 / 视频切分 三个 Tab 不再存在：它们的动作按对象归属
+// 搬进了目录 Tab（目录级：密码、重新索引、数据迁移、上传）与媒体 Tab（文件级：切分、封面、索引、迁移、删除）。
+import m from './mithril.js';
+import { staticHash } from './static-hash.js';
+import { I } from './icons.js';
+import {
+  state, say, api, guard, roleName, loadStorages, loadUsers, loadSettings,
+  loadFolderPasswords, selectDir, fmtTime, goTab, restoreURL,
+} from './admin-core.js';
+import { Dirs, Media } from './admin-dirs.js';
+
+const ico = (d, cls) => m('svg.ic', { viewBox: '0 0 24 24', 'aria-hidden': 'true', class: cls || '' },
+  m('path', { d }));
 
 /* ── 登录 ───────────────────────────────────────────── */
 const Login = {
@@ -96,8 +62,6 @@ const DRIVERS = [
   { v: 'smb',   label: 'Samba / SMB' },
 ];
 
-async function loadStorages() { state.storages = await api('/storage/list') || []; }
-
 function additionOf(driver, f) {
   return driver === 'smb'
     ? { address: f.address, username: f.username, password: f.password,
@@ -110,15 +74,31 @@ const Storages = {
   view() {
     const f = state.storageForm;
     return m('.panel', [
-      m('h2', '挂载点'),
-      m('p.muted', '对外路径（mount_path）是 APP 里的根，驱动私有配置放在 addition 里。'),
+      m('h2', [ico(I.mount), ' 挂载点']),
+      m('p.muted', '对外路径（mount_path）是 APP 里的根；配好之后到「目录」Tab 就能逐层发现其下的子目录。'),
       m('table', [
-        m('thead', m('tr', [m('th', '挂载点'), m('th', '驱动'), m('th', '状态'), m('th.actions', '操作')])),
+        m('thead', m('tr', [m('th', '挂载点'), m('th', '驱动'), m('th', '最近修改'), m('th', '状态'), m('th.actions', '操作')])),
         m('tbody', state.storages.map(s => m('tr', [
-          m('td', s.mount_path),
+          m('td', m('code.path', s.mount_path)),
           m('td', s.driver || 'local'),
+          m('td', fmtTime(s.modified)),
           m('td', s.disabled ? m('span.tag.off', '已停用') : m('span.tag', '启用')),
           m('td.actions', m('span.acts', [
+            // 停用/启用：原来只能进「编辑」才能改，而编辑表单会把停用中的挂载点
+            // 当新状态保存一次——这里直接按当前状态取反，一眼看清在做什么。
+            m('button', {
+              title: s.disabled ? '启用该挂载点' : '停用该挂载点（浏览与索引都不再访问它）',
+              onclick: () => guard(async () => {
+                await api('/storage/update', { method: 'POST', body: {
+                  id: s.id, mount_path: s.mount_path, driver: s.driver,
+                  addition: s.addition, order: s.order || 0, disabled: !s.disabled } });
+                await loadStorages(); say(`${s.mount_path} 已${s.disabled ? '启用' : '停用'}`);
+              }),
+            }, s.disabled ? '启用' : '停用'),
+            // 「在目录中打开」：省掉复制路径再去目录 Tab 一层层点开的来回
+            m('button.ghost', {
+              onclick: () => guard(async () => { goTab('dirs'); await selectDir(s.mount_path); }),
+            }, '在目录中打开'),
             m('button.ghost', { onclick: () => editStorage(s) }, '编辑'),
             m('button.danger', {
               onclick: () => guard(async () => {
@@ -191,13 +171,13 @@ const Storages = {
               m('button.ghost', { onclick: () => state.storageForm = null }, '取消'),
             ]),
           ])
-        : m('button', { onclick: () => newStorage() }, '新增挂载点'),
+        : m('button', { onclick: () => newStorage() }, [ico(I.plus), ' 新增挂载点']),
     ]);
   },
 };
 
 function newStorage() {
-  state.storageForm = { id: 0, mount_path: '', driver: 'local', address: '', share_name: '',
+  state.storageForm = { id: 0, mount_path: '/media', driver: 'local', address: '', share_name: '',
     username: '', password: '', root_folder_path: '', meta_dir: '' };
 }
 
@@ -235,22 +215,26 @@ const AVATARS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, '
 // 与 models.AvatarPresets 的取值一一对应，改那边要同步这里。
 function avatarUrl(key) { return '/static/avatars/' + (key || '01') + '.png'; }
 
-async function loadUsers() { state.users = await api('/user/list') || []; }
-
 const Users = {
   oninit: () => guard(loadUsers),
   view() {
     const f = state.userForm;
     return m('.panel', [
-      m('h2', '用户'),
+      m('h2', [ico(I.user), ' 用户']),
       m('table', [
         m('thead', m('tr', [m('th', '头像'), m('th', '用户名'), m('th', '角色'), m('th', '专属目录'), m('th.actions', '操作')])),
         m('tbody', state.users.map(u => m('tr', [
           m('td', m('img.avatar-sm', { src: avatarUrl(u.avatar), alt: u.username, title: u.avatar || '01' })),
           m('td', u.username),
           m('td', roleName(u.role)),
-          m('td', u.base_path || '—'),
+          m('td', u.base_path ? m('code.path', u.base_path) : '—'),
           m('td.actions', m('span.acts', [
+            // 「查看」= 到目录 Tab 选中这个专属目录：管理员不用记路径就能确认
+            // 「这个人看到的是不是这里」
+            u.base_path ? m('button.ghost', {
+              title: `到目录 Tab 打开 ${u.base_path}`,
+              onclick: () => guard(async () => { goTab('dirs'); await selectDir(u.base_path); }),
+            }, '查看目录') : null,
             m('button.ghost', { onclick: () => editUser(u) }, '编辑'),
             m('button.danger', {
               onclick: () => guard(async () => {
@@ -283,10 +267,20 @@ const Users = {
                 m('label', [m('span', '角色'),
                   m('select', { value: f.role, onchange: e => f.role = Number(e.target.value) },
                     ROLES.map(r => m('option', { value: r.v }, r.label)))]),
+                // 专属目录：候选来自「目录 Tab 已经发现过的目录」，datalist 边打字边补全。
+                // 不为此加一个「浏览目录」弹窗：树已经在目录 Tab 里，跳一次就能拿到路径，
+                // 而这里填的本来就是同一条路径，两套 UI 只会漂移。
                 m('label', [m('span', '专属目录 base_path'),
-                  m('input[type=text]', { value: f.base_path, oninput: e => f.base_path = e.target.value })]),
+                  m('input[type=text]', {
+                    list: 'dir-options', value: f.base_path, oninput: e => f.base_path = e.target.value,
+                    placeholder: '/media/home',
+                  }),
+                  m('datalist#dir-options', [...state.dirsSeen.keys()].sort().map(p => m('option', { value: p }))),
+                  m('span.form-hint', [
+                    '留空 = 不受限；填了就只让这个用户看到该目录。候选来自目录 Tab 已发现的目录，',
+                    m('button.link', { onclick: () => goTab('dirs') }, '去目录 Tab 展开更多'),
+                  ])]),
               ]),
-              m('p.form-hint', '专属目录留空 = 不受限；填了就只让这个用户看到该目录（如 /media/home）。'),
             ]),
             m('.form-section', [
               m('h3', '头像'),
@@ -315,12 +309,11 @@ const Users = {
               m('button.ghost', { onclick: () => state.userForm = null }, '取消'),
             ]),
           ])
-        : m('button', { onclick: () => newUser() }, '新增用户'),
+        : m('button', { onclick: () => newUser() }, [ico(I.plus), ' 新增用户']),
     ]);
   },
 };
 
-function roleName(r) { return (ROLES.find(x => x.v === r) || { label: r }).label; }
 function newUser() {
   state.userForm = { id: 0, username: '', password: '', role: 1, base_path: '', avatar: '01' };
 }
@@ -332,21 +325,11 @@ function editUser(u) {
 /* ── 全局选项 ───────────────────────────────────────── */
 // 选项清单由服务端下发（含 label/hint/当前值），前端不硬编码键名：
 // 后端加一个开关，这里自动多一行，不用改前端。
-async function loadSettings() { state.settings = await api('/setting/list') || []; }
-
-function toggleSetting(opt, on) {
-  return guard(async () => {
-    const d = await api('/setting/update', { method: 'POST', body: { key: opt.key, value: on } });
-    opt.value = d.value; // 以服务端返回为准，失败时不会让界面停在错误状态
-    say(`已${d.value ? '开启' : '关闭'}「${d.label}」`);
-  });
-}
-
 const Settings = {
   oninit: () => guard(loadSettings),
   view() {
     return m('.panel', [
-      m('h2', '全局选项'),
+      m('h2', [ico(I.settings), ' 全局选项']),
       m('p.muted', '改动即时生效，无需重启服务。'),
       state.settings.length === 0
         ? m('p.muted', '正在读取…')
@@ -364,341 +347,23 @@ const Settings = {
   },
 };
 
-/* ── 目录密码 ───────────────────────────────────────── */
-const FolderPwd = {
-  view() {
-    const s = state.folder;
-    return m('.panel', [
-      m('h2', '目录密码'),
-      m('p.muted', '给父目录设一次即可保护整棵子树；密码同样以 bcrypt 存储，不留明文。' +
-        'APP 在 list/get 的 password 字段、取流时用 ?password= 传入（值同样是静态哈希）。'),
-      m('label', [m('span', '目录路径（如 /media/私密）'),
-        m('input[type=text]', { value: s.path, oninput: e => s.path = e.target.value })]),
-      m('label', [m('span', '密码'),
-        m('input[type=password]', { value: s.pwd, oninput: e => s.pwd = e.target.value })]),
-      m('.row', [
-        m('button', {
-          onclick: () => guard(async () => {
-            if (!s.pwd) throw new Error('请填写密码');
-            await api('/folder/password', {
-              method: 'POST',
-              body: { path: s.path, password: await staticHash(s.pwd) },
-            });
-            say('已设置目录密码');
-          }),
-        }, '设置'),
-        m('button.ghost', {
-          onclick: () => guard(async () => {
-            await api('/folder/password', { method: 'POST', body: { path: s.path, password: '' } });
-            say('已清除该目录密码');
-          }),
-        }, '清除'),
-        m('button.ghost', {
-          onclick: () => guard(async () => {
-            const d = await api('/folder/status?path=' + encodeURIComponent(s.path));
-            say(d.protected ? `受保护，规则来自 ${d.protected_dir}` : '该路径未受保护');
-          }),
-        }, '查询状态'),
-      ]),
-    ]);
-  },
-};
-
-/* ── 上传 ───────────────────────────────────────────── */
-const Upload = {
-  view() {
-    const s = state.upload;
-    return m('.panel', [
-      m('h2', '批量上传'),
-      m('label', [m('span', '目标目录'),
-        m('input[type=text]', { value: s.dir, oninput: e => s.dir = e.target.value })]),
-      m('.row', [
-        m('input[type=file][multiple]', {
-          onchange: e => {
-            s.files = [...e.target.files].map(f => ({ raw: f, name: f.name, pct: 0, status: 'pending' }));
-            e.target.value = '';
-          },
-        }),
-        m('button', { disabled: s.busy || s.files.length === 0, onclick: startUpload },
-          s.busy ? '上传中…' : '开始上传'),
-      ]),
-      s.files.length === 0
-        ? m('p.muted', '每个文件单独发一次请求，因此各自有一条独立进度条。')
-        : s.files.map(f => m('.file', [
-            m('.file-head', [
-              m('.file-name', f.name),
-              m('span', { class: f.status === 'error' ? 'err' : (f.status === 'done' ? 'ok' : 'muted') },
-                f.status === 'error' ? f.err : (f.status === 'done' ? '完成' : f.pct + '%')),
-            ]),
-            m('.bar', m('i', { style: `width:${f.status === 'done' ? 100 : f.pct}%` })),
-          ])),
-    ]);
-  },
-};
-
-// 必须用 XHR：fetch 拿不到上传进度
-function uploadOne(file, dir, token) {
-  return new Promise((resolve, reject) => {
-    const fd = new FormData();
-    fd.append('file', file.raw);
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${state.base}/fs/put?path=${encodeURIComponent(dir)}`);
-    if (token) xhr.setRequestHeader('Authorization', token);
-    xhr.upload.onprogress = e => {
-      if (e.lengthComputable) { file.pct = Math.round(e.loaded / e.total * 100); m.redraw(); }
-    };
-    xhr.onload = () => {
-      try {
-        const env = JSON.parse(xhr.responseText);
-        env.code === 200 ? resolve(env.data) : reject(new Error(env.message || '上传失败'));
-      } catch { reject(new Error('响应解析失败')); }
-    };
-    xhr.onerror = () => reject(new Error('网络错误'));
-    xhr.send(fd);
+function toggleSetting(opt, on) {
+  return guard(async () => {
+    const d = await api('/setting/update', { method: 'POST', body: { key: opt.key, value: on } });
+    opt.value = d.value; // 以服务端返回为准，失败时不会让界面停在错误状态
+    say(`已${d.value ? '开启' : '关闭'}「${d.label}」`);
   });
 }
 
-async function startUpload() {
-  const s = state.upload;
-  s.busy = true;
-  const queue = s.files.slice();
-  const worker = async () => {
-    while (queue.length) {
-      const f = queue.shift();
-      f.status = 'uploading';
-      try { await uploadOne(f, s.dir, state.token); f.status = 'done'; f.pct = 100; }
-      catch (e) { f.status = 'error'; f.err = e.message; }
-      m.redraw();
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker));
-  s.busy = false;
-  m.redraw();
-}
-
-/* ── 视频切分（旁路 HLS） ─────────────────────────────── */
-// 与 tools/gen_hls.sh、mediaindex.HLSSegment 同一约定：
-//   <目录>/.hls/<文件名>/index.m3u8 + 分片
-// 隐藏目录不进浏览列表、不被索引，但 /d 可取流；之后 /fs/get 会给该视频带上
-// hls_url，浏览应用就自动优先走 HLS（没有清单时仍走 Range 直链）。
-// 逐文件发请求（与「上传」页同一套路）：各自有状态，一个失败不牵连其余。
-function hlsJoin(dir, name) {
-  return dir === '/' ? '/' + name : dir.replace(/\/+$/, '') + '/' + name;
-}
-
-function hlsSize(n) {
-  if (!n) return '—';
-  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0, v = n;
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-  return (i === 0 ? v : v.toFixed(v < 10 ? 1 : 0)) + ' ' + u[i];
-}
-
-async function listHlsVideos() {
-  const s = state.hls;
-  const d = await api('/fs/list', { method: 'POST', body: { path: s.path } });
-  s.files = ((d && d.content) || [])
-    // 只要视频，且把旁路自身的清单/分片排除掉（类型判定里 .m3u8/.ts 也算视频）
-    .filter(e => !e.is_dir && e.type === 2 && !/\.(m3u8|ts|m4s)$/i.test(e.name))
-    .map(e => ({ name: e.name, path: e.path || hlsJoin(s.path, e.name), size: e.size, status: 'pending' }));
-  s.sel = {};
-  s.listed = true;
-  say(s.files.length ? `列出 ${s.files.length} 个视频` : '该目录没有视频文件');
-}
-
-function toggleHlsAll(on) {
-  const s = state.hls;
-  s.sel = {};
-  if (on) s.files.forEach(f => { s.sel[f.path] = true; });
-}
-
-function hlsStatus(f) {
-  if (f.status === 'running') return '切分中…';
-  if (f.status === 'done') return f.skipped ? '已有清单，已跳过' : '完成';
-  if (f.status === 'error') return f.err || '切分失败';
-  return '待切分';
-}
-
-// 重新索引的状态与切分各记一份：两个操作常交替做（先修索引再切分），
-// 合成一格显示，谁的结果都不会被对方覆盖。
-function reindexStatus(f) {
-  if (f.rstatus === 'running') return '索引中…';
-  if (f.rstatus === 'done') return f.rnote || '已重新索引';
-  if (f.rstatus === 'error') return f.rerr || '索引失败';
-  return '';
-}
-
-function hlsCellText(f) {
-  const rs = reindexStatus(f);
-  return rs ? hlsStatus(f) + ' · ' + rs : hlsStatus(f);
-}
-
-function hlsCellClass(f) {
-  if (f.status === 'error' || f.rstatus === 'error') return 'err';
-  if (f.status === 'done' || f.rstatus === 'done') return 'ok';
-  return 'muted';
-}
-
-async function startHlsCut() {
-  const s = state.hls;
-  const queue = s.files.filter(f => s.sel[f.path]);
-  if (!queue.length) return;
-  s.busy = true;
-  const worker = async () => {
-    while (queue.length) {
-      const f = queue.shift();
-      f.status = 'running'; delete f.err;
-      m.redraw();
-      try {
-        const d = await api('/fs/hls', { method: 'POST', body: { path: f.path } });
-        f.status = 'done'; f.skipped = !!(d && d.skipped);
-      } catch (e) {
-        f.status = 'error'; f.err = e.message;
-      }
-      m.redraw();
-    }
-  };
-  // -c copy 主要是 I/O：并发 2 足够，再多不会更快，只会把磁盘打满
-  await Promise.all(Array.from({ length: Math.min(2, queue.length) }, worker));
-  s.busy = false;
-  m.redraw();
-  say('切分结束');
-}
-
-// 重新索引：**按增量重建**选中视频所在目录的 .index.jsonl。
-//
-// 判据全落在"索引里那条记录与文件现在的情况是否一致"：逐条比 name + size + 最后修改时间 ——
-// 一致就直接沿用旧行（sha1 与已提取的元数据都照抄，**不读文件内容**）；不一致（或没有旧行）
-// 才整读一遍重算 sha1。所以**勾选只决定刷新哪些目录**，不决定重算哪些文件。
-//
-// （早先对选中项所在目录整层强制重算，勾 1 个文件也要把同目录几十个视频全部重读；
-// 再后来改成"只强制点名的"，但那仍然无视了"文件变没变、一比就知道"这件事。）
-//
-// 一次请求带上全部选中项，由后端按目录归拢：索引按目录一份，逐个文件发请求会让同一个目录
-// 被重写 N 遍（见 handlers.FsReindex / mediaindex.RebuildFiles）。
-async function startReindex() {
-  const s = state.hls;
-  const picked = s.files.filter(f => s.sel[f.path]);
-  if (!picked.length) return;
-  s.busy = true;
-  picked.forEach(f => { f.rstatus = 'running'; delete f.rerr; delete f.rnote; });
-  m.redraw();
-  try {
-    const d = await api('/fs/reindex', { method: 'POST', body: { paths: picked.map(f => f.path) } });
-    picked.forEach(f => { f.rstatus = 'done'; f.rnote = '索引已刷新'; });
-    say(`重新索引完成：${d.files} 条记录，其中 ${d.rehashed} 条重算了 sha1（${d.dirs} 个目录）`);
-  } catch (e) {
-    picked.forEach(f => { f.rstatus = 'error'; f.rerr = e.message; });
-    say(e.message, true);
-  }
-  s.busy = false;
-  m.redraw();
-}
-
-// 数据迁移：把勾选视频在 .mocca 里的数据（海报 / 附加信息 / 弹幕评论）打包下载。
-//
-// 不能走 api()：那条路把响应体当 JSON 解析，而这里的响应是 tar.gz 二进制流。
-// 成败靠 Content-Type 区分 —— 失败仍是业务信封（HTTP 200 + JSON），得先认出来再抛错。
-async function startExport() {
-  const s = state.hls;
-  const picked = s.files.filter(f => s.sel[f.path]);
-  if (!picked.length) return;
-  s.busy = true;
-  m.redraw();
-  try {
-    const resp = await fetch(state.base + '/fs/export', {
-      method: 'POST',
-      headers: { 'Authorization': state.token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ paths: picked.map(f => f.path) }),
-    });
-    if ((resp.headers.get('Content-Type') || '').includes('json')) {
-      const env = await resp.json();
-      throw new Error(env.message || '导出失败');
-    }
-    const blob = await resp.blob();
-    const cd = resp.headers.get('Content-Disposition') || '';
-    const m = /filename="([^"]+)"/.exec(cd);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = m ? m[1] : `mocca-export-${picked.length}.tar.gz`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    say(`已导出 ${picked.length} 个视频的 .mocca 数据`);
-  } catch (e) {
-    say(e.message, true);
-  }
-  s.busy = false;
-  m.redraw();
-}
-
-const HlsCut = {
-  view() {
-    const s = state.hls;
-    const picked = s.files.filter(f => s.sel[f.path]).length;
-    return m('.panel', [
-      m('h2', '视频切分（HLS）'),
-      m('p.muted', '只切不转（-c copy）：画质不变、CPU 很低。产物写进 <目录>/.hls/<文件名>/，' +
-        '不进浏览列表、不被索引，但取流照常；之后浏览应用会自动优先走 HLS，没有清单的仍走 Range 直链。'),
-      m('label', [m('span', '目录路径（如 /media/电影）'),
-        m('input[type=text]', { value: s.path, oninput: e => s.path = e.target.value })]),
-      m('.row', [
-        m('button', { disabled: s.busy, onclick: () => guard(listHlsVideos) }, '列出视频'),
-        m('button.ghost', { disabled: s.busy || !s.files.length, onclick: () => toggleHlsAll(true) }, '全选'),
-        m('button.ghost', { disabled: s.busy || !s.files.length, onclick: () => toggleHlsAll(false) }, '清空选择'),
-        m('button', { disabled: s.busy || !picked, onclick: startHlsCut },
-          s.busy ? '切分中…' : `开始切分（${picked}）`),
-        // 重新索引：修"文件变了但索引没跟上"导致封面/简介不显示的情况（详见 startReindex）
-        m('button.ghost', {
-          disabled: s.busy || !picked,
-          title: '刷新勾选视频所在目录的 .index.jsonl：逐条比大小与最后修改时间，' +
-            '没变就沿用旧记录（不读文件内容），变了才重算 sha1。' +
-            '封面与简介按 sha1 寻址，换了文件却看不到封面时用它修。',
-          onclick: () => guard(startReindex),
-        }, s.busy ? '处理中…' : `重新索引（${picked}）`),
-        // 数据迁移：把勾选视频在 .mocca 里的数据打包带走（备份 / 换设备，详见 startExport）
-        m('button.ghost', {
-          disabled: s.busy || !picked,
-          title: '把勾选视频在 .mocca 里的数据（海报 / 附加信息 / 弹幕评论）按 ab/cd 子目录打包为 tar.gz 下载。' +
-            '包内路径带 .mocca/ 前缀，解压到设备根目录即可还原；另附 manifest.json 说明对应关系。' +
-            '索引里没有的视频会按文件内容现算指纹，大文件这一趟会明显变慢。',
-          onclick: startExport,
-        }, s.busy ? '处理中…' : `数据迁移（${picked}）`),
-      ]),
-      s.listed && !s.files.length
-        ? m('p.muted', '这个目录（当前这一层）没有视频文件')
-        : null,
-      s.files.length
-        ? m('table', [
-            m('thead', m('tr', [m('th', ''), m('th', '文件'), m('th', '大小'), m('th', '状态')])),
-            m('tbody', s.files.map(f => m('tr', [
-              m('td', m('input[type=checkbox]', {
-                checked: !!s.sel[f.path], disabled: s.busy,
-                onchange: e => { s.sel[f.path] = e.target.checked; },
-              })),
-              m('td', { title: f.path }, f.name),
-              m('td', hlsSize(f.size)),
-              m('td', { class: hlsCellClass(f) }, hlsCellText(f)),
-            ]))),
-          ])
-        : null,
-    ]);
-  },
-};
-
 /* ── 外壳 ───────────────────────────────────────────── */
-// Material 的 check 图标路径（M3 分段按钮的选中段用；尺寸由 CSS 定，与段宽无关）
-const CHECK_ICON = 'M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z';
-
+// Tab 顺序与职责按本轮需求固定：用户 → 挂载点 → 目录 → 媒体 → 设置。
+// 上传不再是 Tab（在目录/媒体里就地做）；目录密码、重新索引、数据迁移归到目录 Tab。
 const PAGES = [
-  ['storages', '挂载点', Storages],
-  ['users', '用户', Users],
-  ['folder', '目录密码', FolderPwd],
-  ['upload', '上传', Upload],
-  ['hls', '视频切分', HlsCut],
-  ['settings', '全局选项', Settings],
+  ['users',    '用户',   Users,    I.user],
+  ['storages', '挂载点', Storages, I.mount],
+  ['dirs',     '目录',   Dirs,     I.dir],
+  ['media',    '媒体',   Media,    I.video],
+  ['settings', '设置',   Settings, I.settings],
 ];
 
 const App = {
@@ -707,6 +372,9 @@ const App = {
     state.me = await api('/me');
     await loadStorages();
     await loadUsers();
+    // 目录密码清单在登录后就拉一次：树上标锁与「用户·专属目录」判定都要它，
+    // 等用户点进目录 Tab 才拉会让首屏的锁标闪烁。
+    await loadFolderPasswords();
   }),
   view() {
     if (!state.me) return m(Login);
@@ -735,16 +403,23 @@ const App = {
       // 分段按钮组：M3 的选中段除了填色，还带一个对勾。
       // 对勾**每个 tab 都渲染**（未选中的由 CSS 隐藏，且绝对定位不占位）——
       // 只给选中项渲染会让后续 tab 位移，详见 CSS 里 svg.tick 的注释。
-      m('nav', PAGES.map(([key, label]) => {
+      m('nav', PAGES.map(([key, label, , icon]) => {
         const on = state.page === key;
-        return m('button', { class: on ? 'on' : '', onclick: () => state.page = key },
+        return m('button', { class: on ? 'on' : '', onclick: () => goTab(key) },
           m('svg.tick', { viewBox: '0 0 24 24', 'aria-hidden': 'true' },
-            m('path', { d: CHECK_ICON })),
-          label);
+            m('path', { d: I.check })),
+          ico(icon), label);
       })),
       m(cur),
+      // 后台正在跑的批量操作（切分/索引/上传/导出）要有全局可见性：
+      // 面板会滚动，行内状态很容易滚出视野，跑完前拦一下切 Tab 之外的重复点击。
+      state.busy ? m('p.muted.running', [ico(I.refresh, 'spin'), ` ${state.busy}…`]) : null,
     ];
   },
 };
+
+// 先读地址再 mount：Tab / 选中目录 / 媒体筛选在开机第一次绘前就要就位，
+// 否则刷新后会看到“闪一下默认 Tab 再跳回原位”。
+restoreURL(PAGES.map(p => p[0]));
 
 m.mount(document.getElementById('app'), App);

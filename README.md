@@ -40,11 +40,11 @@ It is the backend for the app — and nothing else. The routes, the response env
 - **auth & account** — `POST /api/auth/register`, `POST /api/auth/login/hash`, `GET /api/me`, `POST /api/me/update`, avatars at `GET /static/avatars/:key`
 - **browse & play** — `POST /api/fs/list`, `POST /api/fs/get`, `POST /api/fs/info`, `GET /d/*` (byte-range streaming), `GET /meta/poster`
 - **social** — favorites `/api/favorites`, comments `/api/comments`, danmaku `/api/danmaku` plus its live stream `GET /api/danmaku/stream`
-- **folder passwords** — `GET /api/folder/status`, so a client knows when to ask; setting one remains admin-only
+- **folder passwords** — `GET /api/folder/status` tells a client when to ask, and `GET /api/folder/passwords` returns the folders that have one set; setting it remains admin-only.
 
 The entire admin group is unregistered, so those paths answer with a plain `404` — no envelope, not `code: 404`:
 
-`/api/storage/*`, `/api/fs/{upload,put,remove,rename,move,edit,cov,shot,hls,reindex,uncov,patch,scrape,scrape/apply}`, `POST /api/folder/password`, `/api/setting/*`, `/api/user/*`, and the pages `/` and `/admin/`.
+`/api/storage/*`, `/api/fs/{upload,put,remove,rename,move,edit,cov,shot,hls,reindex,uncov,patch,scrape,scrape/apply}`, `POST /api/folder/password`, `GET /api/folder/passwords`, `/api/setting/*`, `/api/user/*`, and the pages `/` and `/admin/`.
 
 Both builds read the same `.env`, the same `mocca.db` and the same device-side `.mocca/`, so you can swap one binary for the other without migrating anything.
 
@@ -93,9 +93,9 @@ system environment variables with a `MOCCA_` prefix. Precedence: built-in defaul
 - **Byte-range streaming** — `GET /d/<path>` handles `Range`, multi-range, `HEAD` and conditional requests, so players can seek and resume.
 - **Media metadata** — title, duration, cover, summary and multiple authors per item; video / audio / image kinds.
 - **Cover maker** (full build only) — a cover comes from an admin upload or an ffmpeg frame at a timestamp you pick (`/api/fs/shot` for one file, `/api/fs/patch` for a whole folder); it is resized to a 400×300 PNG and stored **on the device**, next to the library, at `<storage-root>/.mocca/ab/cd/<rest-of-sha1>.png`.
-- **Admin console** (full build only) — embedded, works offline over plain HTTP on your LAN: storages, users, metadata, folder passwords and batch upload with one progress bar per file.
+- **Admin console** (full build only) — embedded, works offline over plain HTTP on your LAN, with five fixed tabs: users, storages, folders, media, settings. The **folders** tab walks the tree down from your mount points (no typed paths): pick a level and it lists what is there, counted by type, with folder passwords, re-indexing, data export (backup) and upload all done in place. The **media** tab works on files in the same tree (HLS cutting, ffmpeg frame covers), while re-indexing and data export are batch operations; videos that already have a sidecar playlist are detected, flagged and no longer offered for cutting, and batch upload gives each file its own progress bar. The active tab, the selected folder and the type filter are kept in the URL, so reloading lands where you were.
 - **Browse app** (`/`) — collapsible directory tree, list/grid views, in-page audio and video player, and a full-screen image viewer with zoom; breadcrumbs plus in-folder search.
-- **Accounts & permissions** — admin / user / guest; a user only ever sees its own `base_path`; 12 preset avatars (uploading images is not supported, by design).
+- **Accounts & permissions** — admin / user / guest; a user only ever sees its own `base_path`; 12 hand-drawn cartoon preset avatars (the server draws each one as SVG on request; uploading images is not supported, by design).
 - **Folder passwords** — set once on a parent folder and the whole subtree, streaming included, requires it; stored as bcrypt.
 - **Comments, danmaku, favorites** — comments are unlimited, danmaku are capped at 50 characters and sorted by playback time, favorites are de-duplicated per user.
 - **Operations** — `passwd` self-rescue command, single static binary, all configuration in `.env`.

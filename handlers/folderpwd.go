@@ -50,6 +50,18 @@ func SetFolderPassword(c *echo.Context) error {
 	return helpers.OK(c, map[string]any{"path": req.Path, "protected": true})
 }
 
+// ListFolderPasswords 列出直接设过密码的目录（管理员）。
+//
+// 后台目录树用一次请求就能把「哪些目录带锁」全标出来；逐层问 /folder/status 是 N 次往返。
+// 只回路径清单，不回任何哈希。
+func ListFolderPasswords(c *echo.Context) error {
+	dirs, err := models.ListFolderPasswords()
+	if err != nil {
+		return helpers.Fail(c, helpers.CodeInternal, "读取目录密码清单失败")
+	}
+	return helpers.OK(c, map[string]any{"dirs": dirs})
+}
+
 // FolderPasswordStatus 查询某路径是否受保护（不泄露哈希）。
 func FolderPasswordStatus(c *echo.Context) error {
 	p := c.QueryParam("path")

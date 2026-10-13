@@ -141,6 +141,69 @@ func TestFolderPasswordAdminOnlyAndClear(t *testing.T) {
 	}
 }
 
+// 目录密码清单：后台目录树拿它一次就能把所有带锁的目录标出来。
+// 两条硬要求：只给管理员、只给路径（哈希不能从这条路上漏出去）。
+func TestListFolderPasswords(t *testing.T) {
+	e := newApp(t)
+	admin := makeUser(t, e, "root", "p", models.RoleAdmin)
+	user := makeUser(t, e, "plain", "p", models.RoleGeneral)
+
+	root := t.TempDir()
+	writeTestFile(t, root, "open/a.mp4", "a")
+	writeTestFile(t, root, "secret/b.mp4", "b")
+	writeTestFile(t, root, "secret/deeper/c.mp4", "c")
+	addStorage(t, "/media", "Local", root)
+
+	if code, _ := call(t, e, http.MethodGet, "/api/folder/passwords", "", user); code != 403 {
+		t.Errorf("普通用户查清单应 403，got %d", code)
+	}
+
+	// 直接设过密的两级都要出现；继承而来的子目录**不**单列（清单是「谁设的」）
+	call(t, e, http.MethodPost, "/api/folder/password", `{"path":"/media/secret","password":"k1"}`, admin)
+	call(t, e, http.MethodPost, "/api/folder/password", `{"path":"/media/secret/deeper","password":"k2"}`, admin)
+	_, resp := call(t, e, http.MethodGet, "/api/folder/passwords", "", admin)
+	dirs := listedDirs(resp)
+	if !hasDir(dirs, "/media/secret") || !hasDir(dirs, "/media/secret/deeper") {
+		t.Errorf("清单应含两级设密目录，got %v", dirs)
+	}
+	if hasDir(dirs, "/media/open") || hasDir(dirs, "/media") {
+		t.Errorf("没设过密码的目录不该出现在清单里，got %v", dirs)
+	}
+	if contains(respBody(resp), "$2") {
+		t.Error("清单接口泄露了密码哈希")
+	}
+
+	// 清除后从清单消失（仍是幂等操作）
+	call(t, e, http.MethodPost, "/api/folder/password", `{"path":"/media/secret/deeper","password":""}`, admin)
+	_, resp = call(t, e, http.MethodGet, "/api/folder/passwords", "", admin)
+	if hasDir(listedDirs(resp), "/media/secret/deeper") {
+		t.Errorf("清除后应不在清单里，got %v", listedDirs(resp))
+	}
+}
+
+// hasDir 清单里有没有这个路径（测里的 contains 是子串比对，这里要整项相等）。
+func hasDir(dirs []string, want string) bool {
+	for _, d := range dirs {
+		if d == want {
+			return true
+		}
+	}
+	return false
+}
+
+// listedDirs 从信封里取出 dirs 字段的字符串切片。
+func listedDirs(resp map[string]any) []string {
+	d, _ := resp["data"].(map[string]any)
+	arr, _ := d["dirs"].([]any)
+	out := make([]string, 0, len(arr))
+	for _, v := range arr {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func TestFolderPasswordNeverStoredInPlainText(t *testing.T) {
 	e := newApp(t)
 	admin := makeUser(t, e, "root", "p", models.RoleAdmin)

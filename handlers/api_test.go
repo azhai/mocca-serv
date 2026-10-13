@@ -19,6 +19,12 @@ import (
 // avatarTopColor 从头像 SVG 里取出渐变上段的颜色。
 var avatarTopColor = regexp.MustCompile(`stop offset="0" stop-color="(#[0-9A-F]{6})"`)
 
+// avatarTitle 取头像的造型名（<title>小猫</title>）：既是读屏名，也是「这个 key 真的画了卡通」的凭据。
+var avatarTitle = regexp.MustCompile(`<title>(.+?)</title>`)
+
+// avatarShapes 数一下图元个数（圆/椭圆/路径/矩形）。
+var avatarShapes = regexp.MustCompile(`<(circle|ellipse|path|rect)\b`)
+
 // pwdHash 把明文口令转成客户端会提交的静态哈希。
 //
 // 真实客户端（APP 与内嵌后台）提交口令前一律先做这一步，服务端也只接受这种。
@@ -329,13 +335,14 @@ func TestAvatarServesSVG(t *testing.T) {
 }
 
 // TestAvatarPresetsAreDistinctAndComplete 12 个预设头像必须都取得到、
-// 各自颜色互不相同、且画的是自己的编号。
+// 各自颜色互不相同、各自有一个不重名的卡通造型。
 //
-// 配色是手挑的：写重一个色值会让两个头像长得一模一样，肉眼很难发现，
-// 所以这里逐个取回、按颜色去重比对。
+// 配色与造型都是手写的：写重一个色值或粘错一段图元，会让两个头像长得一模一样，
+// 肉眼很难发现，所以这里逐个取回、按底色与造型名去重比对。
 func TestAvatarPresetsAreDistinctAndComplete(t *testing.T) {
 	e := newApp(t)
 	colors := map[string]string{}
+	names := map[string]string{}
 
 	for _, key := range models.AvatarPresets {
 		req := httptest.NewRequest(http.MethodGet, "/static/avatars/"+key+".png", nil)
@@ -351,24 +358,41 @@ func TestAvatarPresetsAreDistinctAndComplete(t *testing.T) {
 		}
 
 		body := rec.Body.String()
-		if !strings.Contains(body, ">"+key+"</text>") {
-			t.Errorf("头像 %s 的 SVG 里没有自己的编号: %s", key, body)
+		m := avatarTitle.FindStringSubmatch(body)
+		if m == nil {
+			t.Fatalf("头像 %s 没有 <title>（造型名）: %s", key, body)
+		}
+		if prev, dup := names[m[1]]; dup {
+			t.Errorf("头像 %s 与 %s 造型重名 %q", key, prev, m[1])
+		}
+		names[m[1]] = key
+		// 没命中 avatarArts 时会退化成画编号（见 Avatar 里的兜底）；
+		// 12 个预设都有造型，所以这里不允许出现 <text>。
+		if strings.Contains(body, "<text") {
+			t.Errorf("头像 %s 走到了编号兜底，说明 avatarArts 里缺这一张", key)
+		}
+		// 卡通靠多个图元拼出来：只有一两个图元的基本上就是漏画了。
+		if n := len(avatarShapes.FindAllString(body, -1)); n < 5 {
+			t.Errorf("头像 %s 只有 %d 个图元，不像一张卡通: %s", key, n, body)
 		}
 		if strings.Count(body, "<stop ") != 2 || !strings.Contains(body, "linearGradient") {
 			t.Errorf("头像 %s 应是两段渐变: %s", key, body)
 		}
 
-		m := avatarTopColor.FindStringSubmatch(body)
-		if m == nil {
+		c := avatarTopColor.FindStringSubmatch(body)
+		if c == nil {
 			t.Fatalf("头像 %s 的底色解析失败: %s", key, body)
 		}
-		if prev, dup := colors[m[1]]; dup {
-			t.Errorf("头像 %s 与 %s 撞色 %s", key, prev, m[1])
+		if prev, dup := colors[c[1]]; dup {
+			t.Errorf("头像 %s 与 %s 撞色 %s", key, prev, c[1])
 		}
-		colors[m[1]] = key
+		colors[c[1]] = key
 	}
 
 	if len(colors) != len(models.AvatarPresets) {
 		t.Errorf("不同颜色数 %d 与预设数 %d 不一致", len(colors), len(models.AvatarPresets))
+	}
+	if len(names) != len(models.AvatarPresets) {
+		t.Errorf("不同造型数 %d 与预设数 %d 不一致", len(names), len(models.AvatarPresets))
 	}
 }

@@ -2,6 +2,7 @@ package models
 
 import (
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -46,6 +47,27 @@ func SetFolderPassword(dir, secret string) error {
 // ClearFolderPassword 取消目录密码。
 func ClearFolderPassword(dir string) error {
 	return DeleteSetting(FolderPwdPrefix + normalizeFolder(dir))
+}
+
+// ListFolderPasswords 列出**直接**设过密码的目录路径（继承不算：父目录设的那条只出现在父路径上）。
+//
+// 给后台目录树用：一次拿全才能把带锁的目录标出来，逐个路径问「这个受不受保护」
+// 是 N 次请求。返回值里没有任何口令信息 —— 哈希留在库里，这条路上只有路径。
+func ListFolderPasswords() ([]string, error) {
+	// 前缀里没有 % 与 _，所以 LIKE 不用 ESCAPE；改成带通配符的前缀时要同步改这里。
+	rows, err := GetSchema().Setting.Where("key LIKE ?", FolderPwdPrefix+"%").Select().All()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed list folder passwords")
+	}
+	out := make([]string, 0, len(rows))
+	for _, s := range rows {
+		if s.Value == "" {
+			continue // 空值等于没设（清除走删除，这里只是兜底不把它当成受保护目录）
+		}
+		out = append(out, strings.TrimPrefix(s.Key, FolderPwdPrefix))
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // LookupFolderPassword 从 path 起逐级向上找「最近的受保护目录」。

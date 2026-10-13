@@ -84,7 +84,7 @@ printf 'your-password-https://github.com/alist-org/alist' | shasum -a 256 | cut 
 **浏览器端注意**：`crypto.subtle` 只在安全上下文（HTTPS 或 localhost）可用。
 自建服务常用 `http://192.168.x.x:8000` 打开，此时 `crypto.subtle` 是 `undefined`，
 直接调会抛 `TypeError`（表现为「点登录毫无反应」）。内嵌后台为此内置了一份纯 JS 的
-SHA-256 兜底实现（`web/public/app.js`）。
+SHA-256 兜底实现（`web/public/js/static-hash.js`，两端共用）。
 
 ### 2.2 注册、登录与首个管理员
 
@@ -196,6 +196,7 @@ Authorization: Bearer <token>   # 前缀会被剥掉，两种写法等价
 | --- | --- | --- |
 | `POST /api/folder/password` | 管理员 | `{ "path": "/media/私密", "password": "<静态哈希>" }`，`password` 为空即清除 |
 | `GET /api/folder/status` | 公开 | `?path=...` → `{ protected, protected_dir }` |
+| `GET /api/folder/passwords` | 管理员 | → `{ dirs }`：**直接设过密**的目录清单（字典序，不带哈希）；后台用它一次给整棵树标上锁标 |
 
 | 约定 | 说明 |
 | --- | --- |
@@ -374,8 +375,9 @@ POST /api/auth/login/hash         登录取 JWT（口令须先做静态哈希）
 GET  /api/init/status             初始化状态（公开）
 GET  /api/me                      当前用户 🔒
 POST /api/me/update               改头像/改密 🔒（改密需带原口令）
-GET  /api/folder/status?path=     目录是否受保护（公开）
+GET  /api/folder/status           目录是否受保护（公开）
 POST /api/folder/password         设/清目录密码（管理员）
+GET  /api/folder/passwords        直接设过密的目录清单（管理员）
 
 凭证：Authorization: <JWT>（"Bearer " 前缀可选）；取流可用 ?token=
 口令：sha256(明文 + "-" + "https://github.com/alist-org/alist") 小写十六进制

@@ -40,11 +40,11 @@ Mocca 把媒体库通过 HTTP 提供出去。它是单个 Go 二进制文件 —
 - **认证与账号** —— `POST /api/auth/register`、`POST /api/auth/login/hash`、`GET /api/me`、`POST /api/me/update`，头像 `GET /static/avatars/:key`
 - **浏览与播放** —— `POST /api/fs/list`、`POST /api/fs/get`、`POST /api/fs/info`、`GET /d/*`（支持 Range 的取流）、`GET /meta/poster`
 - **社交** —— 收藏 `/api/favorites`、评论 `/api/comments`、弹幕 `/api/danmaku` 及其实时流 `GET /api/danmaku/stream`
-- **目录密码** —— `GET /api/folder/status` 让客户端知道何时该弹口令框；设置密码仍是管理员接口
+- **目录密码** —— `GET /api/folder/status` 让客户端知道何时该弹口令框，`GET /api/folder/passwords` 一次回齐设过密的目录；设置密码仍是管理员接口
 
 管理接口整组不注册，这些路径会落到默认 `404`（没有信封，不是 `code: 404`）：
 
-`/api/storage/*`、`/api/fs/{upload,put,remove,rename,move,edit,cov,shot,hls,reindex,uncov,patch,scrape,scrape/apply}`、`POST /api/folder/password`、`/api/setting/*`、`/api/user/*`，以及页面 `/` 与 `/admin/`。
+`/api/storage/*`、`/api/fs/{upload,put,remove,rename,move,edit,cov,shot,hls,reindex,uncov,patch,scrape,scrape/apply}`、`POST /api/folder/password`、`GET /api/folder/passwords`、`/api/setting/*`、`/api/user/*`，以及页面 `/` 与 `/admin/`。
 
 两种构建读同一份 `.env`、同一个 `mocca.db`、同一份设备侧 `.mocca/`，换二进制不需要迁移任何数据。
 
@@ -93,9 +93,9 @@ Mocca 读工作目录下的 `.env`（可用 `MOCCA_ENV_FILE=/path/to/xxx.env` �
 - **字节范围流媒体** —— `GET /d/<路径>` 支持 `Range`、多段请求、`HEAD` 与条件请求，播放器可以拖动进度、断点续传。
 - **媒体元数据** —— 标题、时长、封面、简介与多个作者；类型分视频 / 音频 / 图片。
 - **封面制作**（仅完整版）—— 封面来自管理员上传，或在指定时间点用 ffmpeg 抽帧（单文件 `/api/fs/shot`、整个目录 `/api/fs/patch`）；统一缩成 400×300 PNG，存**在设备侧**媒体库旁的 `<存储根>/.mocca/ab/cd/<sha1 剩余部分>.png`。
-- **管理后台**（仅完整版）—— 内嵌、离线可用：挂载点、用户、元数据、目录密码，以及每个文件一条独立进度条的批量上传。
+- **管理后台**（仅完整版）—— 内嵌、离线可用：五个 Tab 固定为用户、挂载点、目录、媒体、设置。「目录」Tab 从挂载点出发逐层展开子目录（不用手填路径），选中一层就自动列出内容并按类型计数，目录密码、重新索引、数据迁移（备份）与上传都在这一层就地完成；「媒体」Tab 在同一棵树上做文件级操作（切分 HLS、抽帧作封面），重新索引与数据迁移只按批量给，已经切过的会探测出来并标出、不再给切分入口，批量上传每个文件一条独立进度条。当前 Tab、选中目录与类型筛选写在地址里，刷新不再回到首页。
 - **浏览应用**（`/`）—— 可折叠的树形目录、列表/网格两种视图、页内音频视频播放器，以及支持缩放的全屏图片预览；另有面包屑导航与本目录搜索。
-- **账号与权限** —— 管理员 / 普通用户 / 游客；普通用户只能看到自己的 `base_path`；12 个预设头像（出于安全考虑不支持上传图片）。
+- **账号与权限** —— 管理员 / 普通用户 / 游客；普通用户只能看到自己的 `base_path`；12 个手绘卡通预设头像（服务端按 key 现画 SVG，出于安全考虑不支持上传图片）。
 - **目录密码** —— 给父目录设一次，整棵子树（含取流）都要求密码，以 bcrypt 存储。
 - **评论、弹幕与收藏** —— 评论不限字数；弹幕最长 50 字并按播放时刻排序；收藏按用户去重。
 - **运维** —— `passwd` 自救命令、单个静态二进制、配置全部走 `.env`。

@@ -1,0 +1,156 @@
+/* 管理后台本轮重构的专属样式（只有 /admin/ 用得到，故与 styles.css 分开）：
+   目录树、图标按钮、计数徽章、批量条、媒体列表。
+   颜色一律取 styles.css 里的 M3 令牌，不在这里另定义一档色值。 */
+
+/* 后台比浏览端宽：目录树常驻左栏，980px 放不下「树 + 媒体表（六个图标按钮）」。 */
+.admin .wrap { max-width: 1240px; }
+
+/* 内嵌图标：fill 走 currentColor，所以图标自动跟所在按钮/文字的颜色一致 */
+svg.ic { width: 16px; height: 16px; fill: currentColor; flex: none; vertical-align: -3px; }
+svg.ic.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.running { display: inline-flex; align-items: center; gap: 6px; margin: 4px 0 0; }
+
+/* 图标按钮：后台一行要放六七个动作，文字标签会把面板挤爆，
+   所以动作只留图标 + title 说明（同一动作在目录/媒体两处用同一枚图标）。 */
+.iconbtn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 2px;
+  width: 32px; height: 32px; padding: 0; border-radius: 50%;
+  background: none; border: 1px solid var(--md-outline-variant);
+  color: var(--md-on-surface-variant);
+}
+.iconbtn:hover:not([disabled]) { background: var(--md-outline-hover); border-color: var(--md-outline); color: var(--md-primary); }
+.iconbtn[disabled] { opacity: .3; cursor: not-allowed; background: none; border-color: var(--md-outline-variant); }
+.iconbtn.danger { color: var(--md-error); border-color: var(--md-error-container); }
+.iconbtn.danger:hover:not([disabled]) { background: var(--md-error-hover); border-color: var(--md-error); color: var(--md-error); }
+.iconbtn em.dots { font-style: normal; font-size: 12px; }
+
+/* 两栏：左树右面板。窄屏退成上下堆叠，树收成小块（展开过的层还在，够用）。 */
+.cols { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+.col { min-width: 0; }
+.col.left { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
+@media (max-width: 900px) { .col.left { position: static; max-height: 40vh; } }
+.col.right { display: flex; flex-direction: column; gap: 16px; }
+
+/* ── 目录树 ───────────────────────────────────────────── */
+.tree {
+  background: var(--md-surface-container-lowest);
+  border: 1px solid var(--md-outline-variant); border-radius: 16px;
+  padding: 10px 8px 14px; font-size: 13px;
+}
+.tree-root { display: flex; align-items: center; gap: 6px; padding: 0 4px 8px;
+  border-bottom: 1px solid var(--md-outline-variant); margin-bottom: 6px; }
+.rootpath { flex: 1; font-weight: 600; cursor: pointer; padding: 2px 6px; border-radius: 6px; }
+.rootpath.on { background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
+.tree ul { list-style: none; margin: 0; padding: 0 0 0 14px; }
+.tree li { margin: 0; }
+.tnode { display: flex; align-items: center; gap: 2px; border-radius: 8px; padding-right: 4px; }
+.tnode:hover { background: var(--md-row-hover); }
+.tnode.sel { background: var(--md-secondary-container); }
+.tnode.sel .tname { color: var(--md-on-secondary-container); font-weight: 600; }
+.caret { width: 20px; height: 20px; min-width: 20px; padding: 0; border: none; border-radius: 50%;
+  background: none; color: var(--md-on-surface-variant); }
+.caret:hover:not([disabled]) { background: var(--md-nav-hover); }
+.caret svg.ic { width: 14px; height: 14px; }
+.tname {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px;
+  height: auto; min-height: 28px; padding: 4px 6px; border: none; border-radius: 8px;
+  background: none; color: var(--md-on-surface); font-size: 13px; font-weight: 400;
+  text-align: left; justify-content: flex-start;
+}
+.tname:hover:not([disabled]) { background: var(--md-nav-hover); }
+.tname .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tnode.is-mount > .tname svg.ic { color: var(--md-primary); }
+.pad { padding: 4px 8px; margin: 0; }
+svg.ic.lock { width: 13px; height: 13px; color: var(--md-tertiary); }
+svg.ic.lock.inherit { opacity: .55; }
+
+/* ── 面板内的小结构 ──────────────────────────────────── */
+h2 { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+code.path {
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--md-surface-container); color: var(--md-on-surface-variant);
+  padding: 2px 7px; border-radius: 6px; word-break: break-all;
+}
+td code.path { background: none; padding: 0; }
+.actions-block { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--md-outline-variant); }
+.actions-block > h3 {
+  font-size: 12px; font-weight: 600; letter-spacing: .06em; color: var(--md-primary);
+  margin: 0 0 10px; display: flex; align-items: center; gap: 6px;
+}
+p.muted.hint { display: flex; align-items: flex-start; gap: 6px; line-height: 1.6; }
+/* 读受保护目录时的页内口令栏（不用 prompt：嵌入式浏览器里 prompt 直接不可用） */
+.pwd-ask {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px 14px; border-radius: 12px;
+  background: var(--md-tertiary-container); color: var(--md-on-tertiary-container);
+  border: 1px solid var(--md-outline-variant);
+}
+.pwd-ask input[type=password] { width: 220px; margin-bottom: 0; }
+.pwd-ask span { font-size: 13px; }
+.pwd-in { flex: 1; min-width: 160px; max-width: 320px; margin-bottom: 0; }
+.secs { width: 84px; flex: none; margin-bottom: 0; }
+input[type=file].file-in { font-size: 13px; max-width: 100%; }
+button.link {
+  border: none; background: none; padding: 0; height: auto; color: var(--md-primary);
+  font-size: 12px; font-weight: 600; text-decoration: underline;
+}
+button.link:hover:not([disabled]) { background: none; }
+
+/* ── 计数徽章 / 筛选 ─────────────────────────────────── */
+.row.counts { gap: 6px; }
+.countchip {
+  display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 10px;
+  border-radius: 8px; border: 1px solid var(--md-outline-variant);
+  background: var(--md-surface-container); color: var(--md-on-surface-variant);
+  font-size: 12px; font-weight: 600;
+}
+.countchip:hover:not([disabled]) { background: var(--md-row-hover); border-color: var(--md-outline); }
+.countchip[disabled] { opacity: .45; cursor: default; background: none; }
+.countchip svg.ic { width: 14px; height: 14px; }
+.row.filters { gap: 6px; margin-bottom: 12px; }
+.fchip {
+  display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 12px;
+  border-radius: 15px; border: 1px solid var(--md-outline-variant);
+  background: none; color: var(--md-on-surface-variant); font-size: 12px; font-weight: 600;
+}
+.fchip:hover:not([disabled]) { background: var(--md-outline-hover); }
+.fchip[disabled] { opacity: .4; cursor: default; }
+.fchip.on { background: var(--md-secondary-container); color: var(--md-on-secondary-container); border-color: transparent; }
+.fchip b { font-weight: 700; opacity: .75; }
+.row.batch {
+  gap: 8px; padding: 10px 12px; margin-bottom: 12px; border-radius: 10px;
+  background: var(--md-surface-container);
+}
+
+/* ── 媒体列表 ───────────────────────────────────────── */
+table.media td { vertical-align: middle; }
+td.selh, th.selh { width: 28px; padding-right: 0; }
+td.selh input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--md-primary); }
+td.fname { max-width: 340px; }
+td.fname .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-block; max-width: 250px; vertical-align: -4px; }
+td.st { font-size: 12px; white-space: nowrap; }
+td.st.cut { color: var(--md-on-surface-variant); }
+td.actions button.iconbtn { margin-left: 2px; }
+/* 已切分标记：这一行就是没有剪刀按钮，得让人看出不是漏了，而是已经有旁路清单 */
+span.cutmark {
+  margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; vertical-align: 1px; white-space: nowrap;
+  background: var(--md-secondary-container); color: var(--md-on-secondary-container);
+}
+/* 行内海报缩略：一眼认出「这部有没有封面」，正是重新索引/补齐封面要不要点的判据 */
+img.thumb {
+  display: inline-block; width: 40px; height: 30px; object-fit: cover;
+  border-radius: 4px; border: 1px solid var(--md-outline-variant);
+  background: var(--md-surface-container); vertical-align: -10px; margin-right: 6px;
+}
+.kindic { display: inline-flex; margin-right: 4px; vertical-align: -3px; }
+.kindic.video { color: var(--md-primary); }
+.kindic.audio { color: var(--md-tertiary); }
+.kindic.image { color: #2E7D32; }
+.kindic.text  { color: var(--md-on-surface-variant); }
+.kindic.mount { color: var(--md-primary); }
+.kindic.dir   { color: var(--md-secondary); }
+.kindic.other { color: var(--md-outline); }

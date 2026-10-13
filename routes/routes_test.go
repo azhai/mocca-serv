@@ -41,6 +41,7 @@ var adminRoutes = []string{
 	"POST /api/fs/patch",
 	"POST /api/fs/scrape",
 	"POST /api/folder/password",
+	"GET /api/folder/passwords",
 	"POST /api/setting/update",
 	"POST /api/user/create",
 }

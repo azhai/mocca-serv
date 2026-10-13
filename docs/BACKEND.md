@@ -33,11 +33,14 @@
 ### 明确的非目标
 
 - **播放路径上不转码**：取流永远是「读原文件发字节」（HTTP Range）。播放时不做任何转码。
-- **旁路 HLS 靠显式切分产生，不在请求时切片**：切分是**显式的后台动作** —— 管理后台的
-  「视频切分」页，或命令行 `tools/gen_hls.sh`。两者用同一条命令（`ffmpeg -c copy`，**只切不转**，
+- **旁路 HLS 靠显式切分产生，不在请求时切片**：切分是**显式的后台动作** —— 管理后台
+  「媒体」Tab 的切分按钮，或命令行 `tools/gen_hls.sh`。两者用同一条命令（`ffmpeg -c copy`，**只切不转**，
   画质不变、CPU 极低），产物落在 `<目录>/.hls/<文件名>/index.m3u8` + 分片。服务端只把它当
   普通文件发（`/d` 上按扩展名显式钉 `Content-Type`）；`/fs/get` 检测到清单就多带一个 `hls_url`，
   客户端**优先走 HLS**，没有清单时仍走 Range 直链。不生成 `.mpd`，不做多码率（多码率 = 转码）。
+  已经切过的**不再提供切分入口**：列目录带 `hls: true` 时服务端探一次清单（一次 readdir `.hls` +
+  对候选核对 `index.m3u8`），命中的条目不渲染剪刀按钮、批量切分自动跳过。探测结果不落库：
+  清单本身就是磁盘上的事实，抄一份进索引一遇「没变就沿用旧行」就漂移。
 - **不做内容缓存层**：不缓存文件数据，每个 Range 现读存储（理由见 §7.3）。
 - **不做签名直链**：没有 `sign=` / HMAC / 链接有效期；访问控制只有 JWT、目录密码与游客开关。
 - **不做多租户**：只有管理员 / 普通用户 / 游客三种角色，用户靠 `base_path` 隔离目录。
@@ -290,7 +293,7 @@ srv := &http.Server{
 | 上传文件名 | 只取 `filepath.Base`，挡掉 `../` 穿越 |
 | 封面文件名 | 取基名 → 剥开头的点 → 非法字符换 `-` → 截到 64 字符；类型按**内容嗅探**（不信任文件名与声明的 MIME） |
 | 列表过滤 | 点开头的名字（含 `.mocca` 自身）与系统保留名不下发，避免把封面/系统文件当素材混进列表 |
-| 头像 | 服务端按 key 现画 SVG，不读用户文件；带 `X-Content-Type-Options: nosniff` |
+| 头像 | 服务端按 key 现画 SVG（12 枚手绘卡通 + `<title>` 造型名），不读用户文件；带 `X-Content-Type-Options: nosniff` |
 | 访问日志 | `middlewares.RequestLogger` 记录方法、路径、耗时，慢请求（≥2s）单独标注 |
 | 未做的部分 | **没有** CORS 配置（后台与 API 同源部署，不需要）、**没有**登录失败限流、**没有** IP 白名单 / SSRF 防护（因为不存在上游代理端点）、**没有** HTTPS（交给反向代理） |
 
@@ -369,16 +372,23 @@ if AdminRoutes {
 | `/admin/index.html` | 被 `http.FileServer` 规范化 301 到 `/admin/` |
 | `/css/*`、`/js/*`、`/logo*.png` | 静态资源：文件服务器从 `public/` 根提供 |
 
-两个页面共用同一套 `css/` 与 `js/`，目录布局如下：
+两个页面共用同一套设计令牌与登录口令哈希，但各自的入口 JS 不交叉，目录布局如下：
 
 ```text
 public/
 ├── index.html          浏览应用（/）
 ├── admin/index.html    管理后台（/admin/）
-├── css/                styles.css、home.css
-├── js/                 app.js、home.js、mithril.js、static-hash.js
+├── css/                styles.css（两端共用的 M3 令牌）、home.css（浏览端）、admin.css（后台）
+├── js/                 mithril.js、static-hash.js、icons.js（两端共用）
+│                       home.js                          浏览应用
+│                       app.js                           后台外壳（Tab 表 + 用户/挂载点/设置）
+│                       admin-core.js、admin-dirs.js      后台的目录树 / 目录 / 媒体
 └── logo*.png           APP 图标
 ```
+
+后台把「共用的东西」集中在 admin-core.js（一份 state、`api()`、目录树与上传），admin-dirs.js 只在
+上面拼「目录」与「媒体」两个 Tab：两个 Tab 必须共享同一棵树与同一个选中层，所以 state
+只能有一份，不能各自拿一份。
 
 页面里一律用**绝对路径**引用资源（`/css/styles.css`、`/js/app.js`）：后台页在 `/admin/` 下，
 写相对路径会被解析成 `/admin/css/styles.css` 而 404。
@@ -395,8 +405,8 @@ public/
 | 含 HTML / CSS / JS | 是 | **否** |
 | 可制作封面图 | 是 | **否** |
 
-两个页面都是手写的轻量 SPA（mithril + `app.js` + `home.js` + `styles.css` + `home.css`
-+ logo，`web/public/` 合计约 900KB），加上管理接口的机器码，两版相差约 1.7MB。
+两个页面都是手写的轻量 SPA（mithril + `app.js`/`home.js` + 各自的 css
++ logo，`web/public/` 合计约 920KB），加上管理接口的机器码，两版相差约 1.7MB。
 
 **体积的大头是运行库，不是本项目代码**：runtime 与 pclntab 约 6.4MB、其他标准库约 6MB、
 `modernc.org/sqlite` 约 1.9MB，而 mocca 自己的代码只有 0.11MB。所以「纯 API 版应该小很多」
