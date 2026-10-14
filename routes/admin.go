@@ -43,6 +43,10 @@ func SetupAdminRoutes(e *echo.Echo) {
 	admin.POST("/fs/export", handlers.FsExport)   // 数据迁移：把选中视频的 .mocca 数据打包为 tar.gz
 	admin.POST("/fs/uncov", handlers.FsUncov)     // 删除封面（与上传封面/FFmpeg 截图相对）
 	admin.POST("/fs/patch", handlers.FsPatch)     // 目录级补充截图：给缺封面的视频批量生封面
+	// 弹幕与评论：后台看全量（浏览端只看时间轴窗口）与按类型清空。
+	// 单条删除不在这注册：复用 authed 组的 DELETE /api/comments（管理员可删任何人的）。
+	admin.POST("/fs/social", handlers.FsSocial)
+	admin.POST("/fs/social/clear", handlers.FsSocialClear)
 	// TMDB 刮削：先检索候选，再把选中的那条写进 .mocca 附加信息与封面
 	admin.POST("/fs/scrape", handlers.ScrapeSearch)
 	admin.POST("/fs/scrape/apply", handlers.ScrapeApply)

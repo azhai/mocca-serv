@@ -37,9 +37,12 @@ type ListReq struct {
 	Page     int    `json:"page"`
 	PerPage  int    `json:"per_page"`
 	// HLS 让服务端顺带探测「这一层哪些视频已经有旁路清单」，并回在条目的 hls 字段上。
-	// 默认关：探测要多一次 readdir + 若干部 Stat，而只有管理后台需要这个信息，
+	// 默认关：探测要多一次 readdir + 若干 Stat，而只有管理后台需要这个信息，
 	// 不该让 APP 的列目录白付这份读成本。
 	HLS bool `json:"hls"`
+	// Social 同样默认关，只给管理后台用：探每个媒体的弹幕/评论条数，回在 social 字段上。
+	// 没发过东西的媒体只花一次 MetaStat（见 mediaindex.DanmakuCounts）。
+	Social bool `json:"social"`
 }
 
 // GetReq 取详情请求。
@@ -70,6 +73,9 @@ type MediaObj struct {
 	// 可能是本服务切的，也可能是外部工具（`tools/gen_hls.sh`）或换机时带过来的。
 	// 客户端据此**不再提供切分入口**（重复切既多余又会覆盖已有分片）。
 	HLS bool `json:"hls,omitempty"`
+	// Social 仅当请求带了 `"social": true` 时填充：该媒体的弹幕/评论条数。
+	// 两类都是 0 时不下发（字段为空），前端据此决定要不要挂计数徽标。
+	Social *SocialStat `json:"social,omitempty"`
 	// SHA1 媒体文件内容指纹，来自所在目录的 .index.jsonl（见 mediaindex）。
 	// 没有索引文件或该文件未入列则为空；前端据此拼 .mocca 海报图地址。
 	SHA1 string `json:"sha1,omitempty"`
@@ -354,7 +360,7 @@ func FsList(c *echo.Context) error {
 		return helpers.Fail(c, helpers.CodeForbidden, err.Error())
 	}
 
-	objs, total, err := listDir(models.NormalizeMountPath(scoped), req.Page, req.PerPage, req.HLS)
+	objs, total, err := listDir(models.NormalizeMountPath(scoped), req.Page, req.PerPage, req.HLS, req.Social)
 	if err != nil {
 		return helpers.Fail(c, helpers.CodeNotFound, err.Error())
 	}
@@ -372,12 +378,12 @@ func FsList(c *echo.Context) error {
 // 传入 page/perPage（>=1）时按 .index.jsonl 行区间返回**仅媒体**的分页页（网格用）：
 // 子目录/文本不进分页，靠左侧目录树+面包屑导航；返回的 total 为该层媒体总数。
 // 否则返回旧的整目录列表（含子目录/文本，兼容列表视图）。
-// wantHLS 为真时逐层探一次旁路清单（见 hlsCutNames）。
-func listDir(dir string, page, perPage int, wantHLS bool) ([]MediaObj, int, error) {
+// wantHLS 为真时逐层探一次旁路清单（见 hlsCutNames）；wantSocial 同理探弹幕/评论条数。
+func listDir(dir string, page, perPage int, wantHLS, wantSocial bool) ([]MediaObj, int, error) {
 	if page >= 1 && perPage >= 1 {
-		return listDirPages(dir, page, perPage, wantHLS)
+		return listDirPages(dir, page, perPage, wantHLS, wantSocial)
 	}
-	return listDirFull(dir, wantHLS)
+	return listDirFull(dir, wantHLS, wantSocial)
 }
 
 // hlsCutNames 探这一层有哪些视频已经有旁路 HLS 清单：一次 readdir `<目录>/.hls`，
@@ -424,7 +430,7 @@ func hlsCutForDir(dir string) map[string]bool {
 }
 
 // listDirPages 分页列表：只列媒体，按 .index.jsonl 行区间切，逐条读 .mocca 简介。
-func listDirPages(dir string, page, perPage int, wantHLS bool) ([]MediaObj, int, error) {
+func listDirPages(dir string, page, perPage int, wantHLS, wantSocial bool) ([]MediaObj, int, error) {
 	st, rel, err := resolveStorageStrict(dir)
 	if err != nil {
 		return nil, 0, err
@@ -462,6 +468,15 @@ func listDirPages(dir string, page, perPage int, wantHLS bool) ([]MediaObj, int,
 	if wantHLS {
 		cut = hlsCutNames(drv, rel)
 	}
+	var social map[string]*SocialStat
+	if wantSocial {
+		// 分页行自带 sha1，不需要再读一次索引
+		shas := make(map[string]string, len(rows))
+		for _, r := range rows {
+			shas[r.Name] = r.SHA1
+		}
+		social = socialCounts(drv, shas)
+	}
 	for _, r := range rows {
 		e, ok := names[r.Name]
 		if !ok {
@@ -471,7 +486,8 @@ func listDirPages(dir string, page, perPage int, wantHLS bool) ([]MediaObj, int,
 			Name: e.Name, Size: e.Size, IsDir: false,
 			Modified: e.Modified.Format(time.RFC3339),
 			Type:     objType(e.Name, false), SHA1: r.SHA1,
-			HLS: cut[e.Name],
+			HLS:    cut[e.Name],
+			Social: social[e.Name],
 		}
 		if sd, serr := readSummaryJSON(drv, r.SHA1); serr == nil && sd != nil {
 			o.Summary = sd.Summary
@@ -485,7 +501,7 @@ func listDirPages(dir string, page, perPage int, wantHLS bool) ([]MediaObj, int,
 }
 
 // listDirFull 完整列表：挂载点 + 排序后的真实条目（含子目录/文本）。
-func listDirFull(dir string, wantHLS bool) ([]MediaObj, int, error) {
+func listDirFull(dir string, wantHLS, wantSocial bool) ([]MediaObj, int, error) {
 	// 先读真实条目，才能知道这一层哪些名字会与挂载点重名
 	entries, err := realEntries(dir, len(models.MountChildren(dir)) > 0)
 	if err != nil {
@@ -521,7 +537,15 @@ func listDirFull(dir string, wantHLS bool) ([]MediaObj, int, error) {
 	if wantHLS {
 		cut = hlsCutForDir(dir)
 	}
+	var social map[string]*SocialStat
+	if wantSocial {
+		social = socialForDir(dir, shas)
+	}
 	for _, e := range entries {
+		soc := social[e.Name]
+		if e.IsDir {
+			soc = nil // 目录没有弹幕：索引里只要漂进一个同名条目就会给它挂徽标
+		}
 		rest = append(rest, MediaObj{
 			Name:     e.Name,
 			Size:     e.Size,
@@ -529,8 +553,9 @@ func listDirFull(dir string, wantHLS bool) ([]MediaObj, int, error) {
 			Modified: e.Modified.Format(time.RFC3339),
 			Type:     objType(e.Name, e.IsDir),
 			SHA1:     shas[e.Name],
-			// 只对文件标：同名目录不是「切过的视频」
-			HLS: !e.IsDir && cut[e.Name],
+			// 只对文件标：同名目录不是「切过的视频」，也没有弹幕可谈
+			HLS:    !e.IsDir && cut[e.Name],
+			Social: soc,
 		})
 	}
 	sortObjs(rest)

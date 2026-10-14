@@ -70,7 +70,7 @@ las variables de entorno del sistema con el prefijo `MOCCA_`. Prioridad: valores
 - **Consola de administración** (solo compilación completa) —— integrada y funcional sin conexión: almacenamientos, usuarios, metadatos, contraseñas de carpetas y subida por lotes con una barra de progreso por archivo.
 - **Cuentas y permisos** —— administrador / usuario / invitado; cada usuario solo ve su propio `base_path`; 12 avatares predefinidos (subir imágenes no está soportado, por diseño).
 - **Contraseñas de carpetas** —— se define una vez en la carpeta superior y todo el subárbol (streaming incluido) la exige; se guarda con bcrypt.
-- **Comentarios, danmaku y favoritos** —— comentarios sin límite de longitud, danmaku de hasta 50 caracteres ordenados por momento de reproducción, favoritos sin duplicados por usuario.
+- **Comentarios, danmaku y favoritos** —— comentarios de hasta 500 caracteres, danmaku de hasta 50 caracteres ordenados por momento de reproducción, favoritos sin duplicados por usuario.
 - **Operación** —— comando de rescate `passwd`, un único binario estático y toda la configuración en `.env`.
 
 ## Licencia

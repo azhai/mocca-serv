@@ -199,7 +199,7 @@ curl -s http://127.0.0.1:8000/api/ping      # pong
 #### POST /api/fs/list （公开，登录可选）
 
 ```json
-{ "path": "/media", "password": "<目录密码的静态哈希，可选>", "page": 1, "per_page": 50, "hls": true }
+{ "path": "/media", "password": "<目录密码的静态哈希，可选>", "page": 1, "per_page": 50, "hls": true, "social": true }
 ```
 
 | 字段 | 必填 | 说明 |
@@ -208,6 +208,7 @@ curl -s http://127.0.0.1:8000/api/ping      # pong
 | `password` | 否 | 目标目录（或其任一上层目录）设了密码时必填 |
 | `page` / `per_page` | 否 | 两者都 `>= 1` 时走**分页**：按该目录的 `.index.jsonl` 行区间返回**仅媒体**的一页（网格用），`total` 是该层媒体总数；不传（或任一 < 1）则一次返回全部条目（含子目录/文本） |
 | `hls` | 否 | **默认关**。传 `true` 时服务端顺带探一次旁路清单，命中的条目多一个 `hls: true`（见下表）。探测代价 = 一次 readdir `<目录>/.hls` + 对候选逐个核对清单，所以只给需要它的管理后台用，APP 不传即不付这份读成本 |
+| `social` | 否 | **默认关**。传 `true` 时探每个媒体的弹幕/评论条数，回在条目的 `social` 字段上。代价 = 一个媒体一次元数据 `Stat`（弹幕文件按 sha1 散在 `.mocca` 里，没有「一次 readdir 拿齐整层」的办法），所以同样只给后台用 |
 
 响应：
 
@@ -217,7 +218,8 @@ curl -s http://127.0.0.1:8000/api/ping      # pong
   "data": {
     "content": [
       { "name": "demo.mp4", "size": 734003200, "is_dir": false,
-        "modified": "2026-08-01T12:00:00+08:00", "thumb": "", "type": 2, "sign": "", "hls": true },
+        "modified": "2026-08-01T12:00:00+08:00", "thumb": "", "type": 2, "sign": "", "hls": true,
+        "social": { "danmaku": 3, "comments": 2 }, "sha1": "a1b2c3d4…（40 位）" },
       { "name": "S01", "size": 0, "is_dir": true,
         "modified": "2026-07-30T09:12:00+08:00", "thumb": "", "type": 0, "sign": "" }
     ],
@@ -235,6 +237,8 @@ curl -s http://127.0.0.1:8000/api/ping      # pong
 | `type` | int | 见 §4.3 |
 | `mount` | bool | `true` 表示这一条是**挂载点**（虚拟目录）。`omitempty`，真实目录/文件没有这个键 |
 | `hls` | bool | `true` 表示这个视频**已经有旁路 HLS 清单**（同目录 `.hls/<文件名>/index.m3u8` 存在）。`omitempty`：请求没带 `hls`、没清单、目录与非视频文件都不会出现这个键。只认真清：建了 `.hls/<文件名>/` 却没有 `index.m3u8`（上次切到一半失败）不算切过，仍可重切。管理后台据此把已切分条目的「切分」入口收掉，批量切分也自动跳过它们 |
+| `social` | object | `{"danmaku": 弹幕条数, "comments": 评论条数（含回复）}`。`omitempty`：请求没带 `social`、**两类都是 0**、目录、以及没进过索引（拿不到 `sha1`）的文件都不会出现这个键。后台据此决定要不要挂计数徽标与审核入口（见 §7） |
+| `sha1` | string | 媒体内容指纹，来自同目录 `.index.jsonl`；没索引到则为空（`omitempty`）。弹幕/评论就按它锚定，所以**没有 `sha1` 的文件发不了弹幕** |
 | `thumb` | string | **恒为空**：本服务不生成缩略图 |
 | `sign` | string | **恒为空**：本服务没有签名直链机制（访问控制见鉴权文档） |
 
@@ -695,25 +699,69 @@ sha1 来自媒体文件内容，记在同目录的 `.index.jsonl`（`mocca index
 
 ### 评论与弹幕（读取公开，写入需登录）
 
-评论与弹幕**共用一张表**，靠 `type` 区分。
+两者**共用一份文件**，靠 `type` 区分，存在媒体所在存储的 `.mocca/xx/xx/<sha1>.danmaku.jsonl`
+（追加写 JSONL，一条一行；见 §6.1）。**没有数据表**：记录按媒体内容 sha1 锚定，所以改名、
+在同一存储里移动都不会丢；没进过索引的文件拿不到 sha1，发弹幕会回 `code: 400` 并提示先索引。
 
 | 端点 | 方法 | 权限 | 参数 |
 | --- | --- | --- | --- |
-| `/api/comments` | GET | 公开 | `?path=/media/a.mp4`，按时间正序 |
-| `/api/danmaku` | GET | 公开 | `?path=/media/a.mp4`，按出现时刻正序 |
-| `/api/comments` | POST | 🔒 | `{ "path": "...", "type": 0, "offset": 0, "content": "..." }` |
-| `/api/comments` | DELETE | 🔒 | `{ "id": 12 }`，**只能删自己发的** |
+| `/api/comments` | GET | 公开 | `?path=/media/a.mp4`，回**评论串**：`[{ …顶层评论, "replies": [ … ] }]`，顶层按撰写时间倒序、回复正序 |
+| `/api/danmaku` | GET | 公开 | `?path=/media/a.mp4&from=0&to=60000`，只回弹幕、只回这个毫秒窗口内的，按 `offset` 正序；`from` 省略按 0，`to` 省略（或负）= 不设上界 |
+| `/api/danmaku/stream` | GET | 登录可选 | `?path=…&token=…`（SSE）。EventSource 不能带自定义请求头，所以令牌走查询串；**只推新增**（连接前的历史由客户端先拉一次 `GET /api/danmaku`），15 秒一行注释帧心跳防代理掉线 |
+| `/api/comments` | POST | 🔒 | `{ "path": "...", "content": "...", "parent_id": "可选：回复哪条评论" }` |
+| `/api/danmaku` | POST | 🔒 | `{ "path": "...", "offset": 65000, "content": "..." }` |
+| `/api/comments` | DELETE | 🔒 | `{ "path": "...", "id": "0179…（记录 id）" }`。**只能删自己发的**，管理员可删任何人的，弹幕与评论都行（它按 id 删，不分类型） |
 
-规则（`models.Comment.Validate`）：
+记录对象与评论串：
+
+```json
+{
+  "id": "017919450839690001", "user_id": 1, "user_name": "admin", "user_avatar": "02",
+  "type": 1, "offset": 65000, "content": "第一条弹幕",
+  "created_at": "2026-10-14T10:31:23.969+08:00"
+}
+```
+
+顶层评论与弹幕没有 `parent_id`（`omitempty`），只有回复带：它就是那个父记录的 `id`。
+评论串则是这条记录外面套一层 `{ …顶层评论, "replies": [ 回复记录… ] }`。
 
 | 项 | 评论（`type=0`） | 弹幕（`type=1`） |
 | --- | --- | --- |
-| 字数 | 不限 | ≤ **50 个字符**（按 Unicode 码点计，中文算 1 字） |
+| 字数 | ≤ **500**（`mediaindex.MaxCommentLength`，按 Unicode 码点计） | ≤ **50**（`MaxDanmakuLength`） |
 | `offset` | 强制归零 | 出现时刻（毫秒），必须 ≥ 0 |
-| 排序 | 创建时间正序 | `offset` 正序 |
+| `parent_id` | 可挂顶层评论，**只做一层**（再套下去播放器那块小地方放不下） | 不用 |
+| 排序 | 顶层倒序 + 回复正序 | `offset` 正序 |
 
-`content` 会先 `TrimSpace`；空内容 / 空 `path` / 未知 `type` 一律 `code: 400`。
-删除别人的评论返回 `code: 400`、`cannot delete other's comment`。
+要点：
+
+- `id` 服务端生成且**定长**（毫秒时间戳 + 同毫秒序号），所以上面写的字典序就是时间序，倒序展示直接按 id 排；
+- `user_name` / `user_avatar` 是**发送当时的快照**：用户以后改昵称、换头像，历史记录仍显示当时的样子
+  （文件里没有用户表可 join，而这正是要的效果）；
+- `content` 会先 `TrimSpace`；空内容 / 空 `path` / 未知 `type` / 弹幕时刻为负 一律 `code: 400`；
+- 删不存在的记录回 `code: 400`、`弹幕或评论不存在`；删别人的回 `code: 400`、`不能删除别人的弹幕`。
+
+### 后台的弹幕与评论审核（管理员）
+
+只有完整版挂（纯 API 版整组不挂）。单条删除**不另开接口**：直接复用上面的
+`DELETE /api/comments`，它在 `DeleteDanmaku` 里按 `isAdmin` 放行。
+
+| 端点 | 方法 | 请求体 | 响应 |
+| --- | --- | --- | --- |
+| `/api/fs/social` | POST | `{ "path": "/media/a.mp4" }` | 一次读齐一屏：`{ "sha1": "…", "counts": { "danmaku": 3, "comments": 2 }, "danmaku": [ 全量弹幕，按写入顺序 ], "comments": [ 评论串，同 GET /api/comments ] }` |
+| `/api/fs/social/clear` | POST | `{ "path": "…", "kind": "danmaku、comment、all 三选一" }` | `{ "cleared": 条数 }` |
+
+要点：
+
+- 与浏览端的 `GET /api/danmaku` 不同，这里的弹幕**不按时间窗口筛**（审核要看全量），也**不预排序**
+  （jsonl 是追加写的，就是发送顺序）；要按时间轴展示请客户端自己按 `offset` 排。
+  `danmaku` 与 `comments` 都初始化为空数组而不是 `null`，前端直接 `.map()`。
+- 清空是**整文件重写**（追加写的 jsonl 没有原地删一类的办法）；一条不剩就把文件删掉，不留空壳。
+  本来就没有可清的（`cleared: 0`）不会把一个不存在的文件创建出来。
+- `kind` **不给默认值**：漏字段就清两类属于数据丢失类的坑，所以直报 `code: 400`（`kind 只认 danmaku / comment / all`）。
+- 没有回收站：不可恢复，后台的两个按钮都带二次确认。
+- 删除与清空**不推 SSE**：`PublishDanmaku` 只推新增，现有单条删除也没推，保持一致（播放器打开时重取）。
+- 计数怎么来：`POST /api/fs/list` 带 `social: true` 时顺带探（见 §4.1）。**不落库、每次列目录现探**：
+  弹幕随时在增减，抄进 `.index.jsonl` 一定漂移（同 ADR 0004 的取舍）。
 
 ---
 

@@ -70,7 +70,7 @@ Systemumgebungsvariablen mit dem Präfix `MOCCA_`. Rangfolge: eingebaute Standar
 - **Verwaltungskonsole** (nur vollständiger Build) —— eingebaut, funktioniert offline: Speicher, Benutzer, Metadaten, Ordner-Passwörter und Massen-Upload mit eigenem Fortschrittsbalken je Datei.
 - **Konten & Rechte** —— Administrator / Benutzer / Gast; ein Benutzer sieht ausschließlich sein eigenes `base_path`; 12 vorgegebene Avatare (Bild-Upload wird bewusst nicht unterstützt).
 - **Ordner-Passwörter** —— einmal beim übergeordneten Ordner gesetzt, verlangt der gesamte Teilbaum (inklusive Streaming) das Passwort; gespeichert als bcrypt.
-- **Kommentare, Danmaku, Favoriten** —— Kommentare ohne Längenlimit, Danmaku bis 50 Zeichen, nach Abspielzeit sortiert, Favoriten je Benutzer ohne Duplikate.
+- **Kommentare, Danmaku, Favoriten** —— Kommentare bis 500 Zeichen, Danmaku bis 50 Zeichen, nach Abspielzeit sortiert, Favoriten je Benutzer ohne Duplikate.
 - **Betrieb** —— `passwd` zur Selbstrettung, einzelne statische Binärdatei, alle Konfiguration in `.env`.
 
 ## Lizenz

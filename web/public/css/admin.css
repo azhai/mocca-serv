@@ -1,6 +1,7 @@
 /* 管理后台本轮重构的专属样式（只有 /admin/ 用得到，故与 styles.css 分开）：
-   目录树、图标按钮、计数徽章、批量条、媒体列表。
-   颜色一律取 styles.css 里的 M3 令牌，不在这里另定义一档色值。 */
+   目录树、图标按钮、计数徽章、批量条、媒体列表、弹幕/评论审核弹层。
+   颜色一律取 styles.css 里的 M3 令牌，不在这里另定义一档色值（弹层遮罩与投影
+   的中性黑例外：令牌表里没有这一档，home.css 也是直写 rgba）。 */
 
 /* 后台比浏览端宽：目录树常驻左栏，980px 放不下「树 + 媒体表（六个图标按钮）」。 */
 .admin .wrap { max-width: 1240px; }
@@ -140,6 +141,23 @@ span.cutmark {
   font-size: 11px; font-weight: 600; vertical-align: 1px; white-space: nowrap;
   background: var(--md-secondary-container); color: var(--md-on-secondary-container);
 }
+/* 已切分的文件名那一格铺浅色斜条纹：一屏里「哪几部切过」靠扫一眼，
+   不必逐行读到徽标文字。条纹色与「已切分」圆牌同源，两者说的是同一件事；
+   只给文件名那一格，不给整行（整行铺色会跟 tbody tr:hover 的斑马纹打架）。
+   条纹用 transparent 补空，所以底色就是行自己的表面色，无需适配另定义一档。 */
+td.fname.cut {
+  border-radius: 8px;
+  background: repeating-linear-gradient(135deg,
+    var(--md-secondary-container) 0 6px, transparent 6px 12px);
+}
+/* 圆牌落在同色条纹上会「融进去」（冒烟肉眼报出来的）：改成白底 + 一圈描边。
+   描边用 outline-variant 而不是条纹同色系：实测描边压着条纹的那一段与条纹同色（1.00:1）
+   会断掉，而中性灰在条纹带和白缝上都连得起来，轮廓靠它撑整圈。 */
+td.fname.cut span.cutmark,
+td.fname.cut span.socialmark {
+  background: var(--md-surface);
+  box-shadow: inset 0 0 0 1px var(--md-outline-variant);
+}
 /* 行内海报缩略：一眼认出「这部有没有封面」，正是重新索引/补齐封面要不要点的判据 */
 img.thumb {
   display: inline-block; width: 40px; height: 30px; object-fit: cover;
@@ -154,3 +172,40 @@ img.thumb {
 .kindic.mount { color: var(--md-primary); }
 .kindic.dir   { color: var(--md-secondary); }
 .kindic.other { color: var(--md-outline); }
+
+/* ── 弹幕/评论审核 ─────────────────────────────────── */
+/* 行上计数：与「已切分」同款，区别在它能点——后面那个弹幕图标就是入口。
+   已切分那一格上两枚牌都会被条纹吃掉轮廓，下面 td.fname.cut 的规则一并接手它们 */
+span.socialmark {
+  margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; vertical-align: 1px; white-space: nowrap;
+  background: var(--md-primary-container); color: var(--md-on-primary-container);
+}
+/* 遮罩与面板是兄弟（不是父子）：面板里的点击因此到不了关闭区 */
+.social-mask { position: fixed; inset: 0; z-index: 60; display: flex;
+  align-items: center; justify-content: center; padding: 16px; }
+.social-bg { position: absolute; inset: 0; background: rgba(0, 0, 0, .45); }
+.social-panel { position: relative; width: min(760px, 100%); max-height: 86vh; overflow: auto;
+  padding: 16px 18px; border-radius: 16px; border: 1px solid var(--md-outline-variant);
+  background: var(--md-surface-container-low); box-shadow: 0 12px 32px rgba(0, 0, 0, .28); }
+.social-head { display: flex; align-items: center; gap: 8px; }
+.social-head h3 { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 16px; }
+.social-head h3 code.path { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.social-head .iconbtn { margin-left: auto; }
+.row.social-sum { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 2px; }
+.social-panel h4 { margin: 16px 0 6px; font-size: 13px; color: var(--md-on-surface-variant); }
+.social-list { display: flex; flex-direction: column; gap: 4px; }
+.srow { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 10px;
+  background: var(--md-surface-container); font-size: 13px; }
+/* 回复缩进：一层就够（与 mediaindex 的 CommentThread 同口径），左侧一条竖线接得上父评 */
+.srow.reply { margin-left: 30px; background: transparent; border-radius: 0 10px 10px 0;
+  border-left: 2px solid var(--md-outline-variant); }
+.srow .savatar { width: 24px; height: 24px; border-radius: 50%; flex: none;
+  background: var(--md-surface-container-high); }
+.srow .sname { flex: none; max-width: 110px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow .stag { flex: none; padding: 1px 6px; border-radius: 999px; font-size: 11px;
+  background: var(--md-secondary-container); color: var(--md-on-secondary-container); }
+.srow .scontent { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.srow .stime { flex: none; font-size: 12px; color: var(--md-on-surface-variant); }
+.srow .iconbtn { width: 26px; height: 26px; flex: none; }

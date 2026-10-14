@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -123,10 +124,14 @@ func newDanmakuID() string {
 
 // ---------- 写入 ----------
 
-// danmakuMu 串行化对同一份弹幕文件的写。
+// danmakuMu 串行化对弹幕文件的**写与整读**（写在这一段，读在 ReadDanmaku）。
 //
-// 追加写本身在内核层是原子的，但「确认文件以换行结尾」+「追加」是两步，
-// 两步之间插入另一个写者就会拼出 `...}{...}` 这种坏行。所以这里排队。
+// 为什么写要排队：追加本身在内核层是原子的，但「确认文件以换行结尾」+「追加」是两步，
+// 两步之间插入另一个写者就会拼出 `...}{...}` 这种坏行。
+//
+// 为什么读也要排队：整体重写（删一条 / 清一类）是 MetaCreate 截断 + 缓冲 Flush，
+// 中间必然有个「空文件 / 半文件」的窗口；读如果不排队，那个窗口里的残缺会被连 stat
+// 一起写进缓存，而它事后与真实文件完全吻合 —— 缓存就再也发现不了自己错了。
 var danmakuMu sync.Mutex
 
 // AppendDanmaku 追加一条弹幕/评论到该媒体的 jsonl 文件。
@@ -181,13 +186,23 @@ func ensureTrailingNewline(drv drivers.Driver, rel string) error {
 	if err != nil {
 		return err
 	}
+	if size == 0 {
+		closeStream(f)
+		return nil
+	}
+	// 要看的是**最后一**字节，不是文件开头：从当前位置 Read 拿到的是 '{'，
+	// 于是每次追加都会多补一个换行（读侧靠空行跳过兼容，但文件会一路虚胖）。
+	if _, err := f.Seek(size-1, io.SeekStart); err != nil {
+		closeStream(f)
+		return err
+	}
 	var last [1]byte
 	if _, err := f.Read(last[:]); err != nil && err != io.EOF {
 		closeStream(f)
 		return err
 	}
 	closeStream(f)
-	if size == 0 || last[0] == '\n' {
+	if last[0] == '\n' {
 		return nil
 	}
 	a, err := drv.MetaAppend(rel)
@@ -245,9 +260,29 @@ func ReadDanmaku(drv drivers.Driver, sha1hex string) ([]*Entry, error) {
 	cacheMu.RUnlock()
 
 	st, serr := drv.MetaStat(rel)
-	if cached != nil && serr == nil && cached.modTime.Equal(st.Modified) && cached.size == st.Size {
+	if serr != nil && os.IsNotExist(errors.Cause(serr)) {
+		// 只有真「不存在」才算这个媒体没人发过东西。以前这里还要再走一次
+		// MetaOpen（必然失败）+ MetaStat，等于每部片子两次元数据往返；
+		// 后台列目录逐条探弹幕数时，这个差别会被放大到整个目录。
+		//
+		// MetaStat 报其它错（权限、I/O、SMB 会话抖一下）则**不能**走这条路：
+		// 把一次抖动洗成「这部片子没人说过话」，后台的徽标会整层消失且不留痕迹；
+		// 那种错落到下面的整读里 —— 文件打得开就照读，打不开才当作没有。
+		// （本地盘仍只花一次 Stat；SMB 若认不出 not-exist，就退回改前的两次往返。）
+		return []*Entry{}, nil
+	}
+	// st 在 serr != nil 时是零值，不能拿它比缓存。
+	if serr == nil && cached != nil && cached.modTime.Equal(st.Modified) && cached.size == st.Size {
 		return cached.rows, nil // 缓存命中：一次 stat 就够，不读文件
 	}
+
+	// 未命中：整读。**读必须和写共用 danmakuMu** —— 逐条删与按类型清空都是
+	// MetaCreate（立即截断）+ 缓冲重写，读者撞进那个窗口就会把「空文件 / 半文件」
+	// 连同它当时的 (mtime,size) 一起写进缓存；等重写完成，那份 stat 反而与真实
+	// 文件完全吻合，缓存再也自校不回来（叠上 danmakuCacheAppend 的乐观合并，
+	// 后面的新记录会接到残缺列表尾巴上）。弹幕文件很薄，读者排在一次写后面不疼。
+	danmakuMu.Lock()
+	defer danmakuMu.Unlock()
 
 	rows, stat, err := readDanmakuFile(drv, rel)
 	if err != nil {
@@ -325,6 +360,24 @@ func readDanmakuFile(drv drivers.Driver, rel string) ([]*Entry, drivers.Entry, e
 }
 
 // ---------- 查询 ----------
+
+// DanmakuCounts 某媒体的弹幕与评论各几条（后台列目录的计数探测用）。
+// 没有文件就是 0,0：ReadDanmaku 对这种情形只花一次 MetaStat。
+func DanmakuCounts(drv drivers.Driver, sha1hex string) (danmaku, comments int, err error) {
+	rows, err := ReadDanmaku(drv, sha1hex)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, e := range rows {
+		switch e.Type {
+		case DanmakuTypeDanmaku:
+			danmaku++
+		case DanmakuTypeComment:
+			comments++
+		}
+	}
+	return danmaku, comments, nil
+}
 
 // DanmakuInRange 取 [from, to] 毫秒区间内的弹幕（含端点），按出现时刻排序。
 // 播放器按时间轴只取当前窗口用；from<0 视为 0，to<0 表示不设上界。
@@ -409,7 +462,6 @@ func DeleteDanmaku(drv drivers.Driver, sha1hex, id string, uid uint, isAdmin boo
 
 	danmakuMu.Lock()
 	defer danmakuMu.Unlock()
-	InvalidateDanmakuCache(drv, sha1hex)
 
 	rows, _, err := readDanmakuFile(drv, rel)
 	if err != nil {
@@ -430,9 +482,20 @@ func DeleteDanmaku(drv drivers.Driver, sha1hex, id string, uid uint, isAdmin boo
 	if !found {
 		return ErrDanmakuNotFound
 	}
+	if err := writeDanmakuRows(drv, rel, kept); err != nil {
+		return err
+	}
+	// 失效放在重写**之后**：以前是先 delete 再截断重写，等于主动把「读到空文件」
+	// 的机会留给并发读者（读者现在也在同一把锁里，两头都堵上才说得过去）。
+	InvalidateDanmakuCache(drv, sha1hex)
+	return nil
+}
 
+// writeDanmakuRows 把剩下的条目整体重写回文件；一条不剩就把文件删掉，别留一个空壳。
+//
+// 逐条删与按类型清空共用这一份：两处各写一遍覆写逻辑，将来改格式（加字段、改编码）必漏一处。
+func writeDanmakuRows(drv drivers.Driver, rel string, kept []*Entry) error {
 	if len(kept) == 0 {
-		// 删光了：把文件也删掉，别留一个空壳
 		_ = drv.MetaRemove(rel)
 		return nil
 	}
@@ -452,4 +515,45 @@ func DeleteDanmaku(drv drivers.Driver, sha1hex, id string, uid uint, isAdmin boo
 		}
 	}
 	return errors.WithStack(bw.Flush())
+}
+
+// DanmakuAll 给 ClearDanmaku 表示「两类都清」。
+const DanmakuAll = -1
+
+// ClearDanmaku 清空某媒体的弹幕或评论：onlyType 取 DanmakuTypeDanmaku /
+// DanmakuTypeComment / DanmakuAll，返回清掉的条数（本来就没有就是 0）。
+//
+// 为什么不循环调 DeleteDanmaku：那是「每删一条重写一次整个文件」，O(条数×文件)；
+// 这里一次读 + 一次重写就够了。
+func ClearDanmaku(drv drivers.Driver, sha1hex string, onlyType int) (int, error) {
+	rel, err := DanmakuRel(sha1hex)
+	if err != nil {
+		return 0, err
+	}
+
+	danmakuMu.Lock()
+	defer danmakuMu.Unlock()
+
+	rows, _, err := readDanmakuFile(drv, rel)
+	if err != nil {
+		return 0, err
+	}
+	kept := make([]*Entry, 0, len(rows))
+	cleared := 0
+	for _, e := range rows {
+		if onlyType == DanmakuAll || e.Type == onlyType {
+			cleared++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if cleared == 0 {
+		return 0, nil // 没有要清的东西：别把一个不存在的文件创建出来
+	}
+	if err := writeDanmakuRows(drv, rel, kept); err != nil {
+		return 0, err
+	}
+	// 与 DeleteDanmaku 同一条规矩：重写完成才让缓存失效。
+	InvalidateDanmakuCache(drv, sha1hex)
+	return cleared, nil
 }

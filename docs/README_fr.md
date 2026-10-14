@@ -70,7 +70,7 @@ les variables d'environnement préfixées par `MOCCA_`. Priorité : valeurs par 
 - **Console d'administration** (compilation complète uniquement) —— intégrée, fonctionne hors ligne : stockages, utilisateurs, métadonnées, mots de passe de dossiers et envoi par lots avec une barre de progression par fichier.
 - **Comptes & permissions** —— administrateur / utilisateur / invité ; un utilisateur ne voit que son propre `base_path` ; 12 avatars prédéfinis (l'envoi d'images n'est volontairement pas pris en charge).
 - **Mots de passe de dossiers** —— défini une fois sur un dossier parent, tout le sous-arbre (streaming compris) l'exige ; stocké en bcrypt.
-- **Commentaires, danmaku, favoris** —— commentaires sans limite de longueur, danmaku limités à 50 caractères et triés par instant de lecture, favoris dédupliqués par utilisateur.
+- **Commentaires, danmaku, favoris** —— commentaires limités à 500 caractères, danmaku limités à 50 caractères et triés par instant de lecture, favoris dédupliqués par utilisateur.
 - **Exploitation** —— commande de secours `passwd`, binaire statique unique, configuration entièrement dans `.env`.
 
 ## Licence

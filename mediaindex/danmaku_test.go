@@ -1,6 +1,7 @@
 package mediaindex_test
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -350,6 +351,180 @@ func TestDanmakuLengthLimit(t *testing.T) {
 		Type: mediaindex.DanmakuTypeDanmaku, Offset: -1, Content: "x",
 	}); err == nil {
 		t.Error("负时间点应被拒")
+	}
+}
+
+// statErrDriver 把 MetaStat 换成一个「不是不存在」的错（模拟 SMB 会话抖一下 / I/O 错）。
+type statErrDriver struct{ drivers.Driver }
+
+func (d statErrDriver) MetaStat(string) (drivers.Entry, error) {
+	return drivers.Entry{}, os.ErrPermission
+}
+
+// TestReadDanmakuStatErrorIsNotSilenced 列目录为了省一次往返只 Stat 一次，
+// 但 Stat 失败不等于「没有这个文件」。
+//
+// 这条钉的是：权限/I/O 错必须不能被洗成「这部片子没人说过话」—— 否则一次网络
+// 抖动会让后台整层徽标无声消失（既不报错也不记日志）。文件还在，MetaOpen 能成，
+// 就应该照读出全部记录。
+func TestReadDanmakuStatErrorIsNotSilenced(t *testing.T) {
+	root := t.TempDir()
+	drv := openDriver(t, root)
+	defer func() { _ = drv.Close() }()
+	sha := sha1hex("video")
+
+	for i := 0; i < 2; i++ {
+		if err := mediaindex.AppendDanmaku(drv, sha, &mediaindex.Entry{
+			UserID: 1, UserName: "u", UserAvatar: "01",
+			Type: mediaindex.DanmakuTypeDanmaku, Offset: i * 1000, Content: "在的",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rows, err := mediaindex.ReadDanmaku(statErrDriver{drv}, sha)
+	if err != nil {
+		t.Fatalf("Stat 抖动不该让整个读失败: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Errorf("MetaStat 报错被当成「没有弹幕」了：读到 %d 条，应 2 条", len(rows))
+	}
+}
+
+// slowCreateDriver 把「已截断、内容还没落盘」那个窗口拉开：MetaCreate 照样立即截断，
+// 但第一次 Write（也就是 bufio.Flush 那一次）之前先睡一会儿。
+// 有了它，「后台清空」撞上「播放器读弹幕」就能写成一条**确定性**测试，而不是靠运气复现。
+type slowCreateDriver struct {
+	drivers.Driver
+	window time.Duration
+}
+
+func (d slowCreateDriver) MetaCreate(rel string) (io.WriteCloser, error) {
+	f, err := d.Driver.MetaCreate(rel)
+	if err != nil {
+		return nil, err
+	}
+	return slowFlushWriter{f, d.window}, nil
+}
+
+type slowFlushWriter struct {
+	io.WriteCloser
+	window time.Duration
+}
+
+func (w slowFlushWriter) Write(p []byte) (int, error) {
+	time.Sleep(w.window) // 睡在截断之后、内容写回之前
+	return w.WriteCloser.Write(p)
+}
+
+// TestDanmakuClearWindowDoesNotPoisonCache 重写过程中的残缺不能进读缓存。
+//
+// 整体重写是 MetaCreate（立即截断）+ 缓冲 Flush，中间有个「空文件」窗口。读者
+// 若不在 danmakuMu 里，会把空文件连它的 (mtime,size) 一起写进缓存；重写完成后
+// 这份 stat 反而与真实文件完全吻合，缓存再也发现不了自己错了，后面的追加还会接到
+// 残缺列表尾巴上 —— 那几条保留记录在读取视图里就此消失。
+func TestDanmakuClearWindowDoesNotPoisonCache(t *testing.T) {
+	root := t.TempDir()
+	drv := openDriver(t, root)
+	defer func() { _ = drv.Close() }()
+	sha := sha1hex("video")
+
+	for i := 0; i < 6; i++ {
+		typ := mediaindex.DanmakuTypeDanmaku
+		if i >= 4 {
+			typ = mediaindex.DanmakuTypeComment
+		}
+		if err := mediaindex.AppendDanmaku(drv, sha, &mediaindex.Entry{
+			UserID: 1, UserName: "u", UserAvatar: "01", Type: typ,
+			Offset: i * 1000, Content: "保留的弹幕",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 先让缓存里躺着一份与文件吻合的完整记录（相当于播放器已经拉过一次）
+	if rows, err := mediaindex.ReadDanmaku(drv, sha); err != nil || len(rows) != 6 {
+		t.Fatalf("前置条件没建立：%v / %d 条", err, len(rows))
+	}
+
+	slow := slowCreateDriver{drv, 150 * time.Millisecond}
+	done := make(chan error, 1)
+	go func() {
+		_, err := mediaindex.ClearDanmaku(slow, sha, mediaindex.DanmakuTypeComment)
+		done <- err
+	}()
+	time.Sleep(40 * time.Millisecond) // 让清空先进到截断窗口里
+
+	// 窗口里的读者：改前它拿到 0 条并把 0 条缓存下来；现在它应该在锁后面等。
+	mid, err := mediaindex.ReadDanmaku(slow, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mid) != 4 {
+		t.Errorf("读到截断窗口里的残缺：%d 条，应等到重写完成后的 4 条", len(mid))
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("清空失败: %v", err)
+	}
+
+	// 窗口结束后再发一条：写后合并会把这条接到缓存里那份列表尾巴上。
+	// 上面那次残缺若进了缓存，这里就只剩 1 条 —— 而缓存的 (mtime,size) 与真实
+	// 文件完全吻合，再也不会重读，那 4 条弹幕从此在读取视图里消失。
+	if err := mediaindex.AppendDanmaku(slow, sha, &mediaindex.Entry{
+		UserID: 2, UserName: "v", UserAvatar: "02",
+		Type: mediaindex.DanmakuTypeComment, Content: "刚发的评论",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := mediaindex.ReadDanmaku(slow, sha)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 {
+		t.Errorf("缓存被截断窗口污染了：%d 条，应 5 条（4 弹幕 + 1 新评论）", len(got))
+	}
+	// 与磁盘对账：缓存视图不能比文件本身少
+	rel, _ := mediaindex.DanmakuRel(sha)
+	b, err := os.ReadFile(filepath.Join(root, ".mocca", filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk := len(splitLines(strings.TrimSpace(string(b)))); len(got) != onDisk {
+		t.Errorf("读到 %d 条，磁盘上有 %d 行", len(got), onDisk)
+	}
+}
+
+// TestDanmakuAppendKeepsFileTight ensureTrailingNewline 只能看真正的**最后一个**字节。
+//
+// 它原样从当前位置 Read，拿到的永远是行首的 '{'，于是每条追加都多补一个换行：
+// 读侧靠「空行跳过」不会坏，但文件会一路虚胖，而且「只补真需要的换行」这个前提其实是假的。
+func TestDanmakuAppendKeepsFileTight(t *testing.T) {
+	root := t.TempDir()
+	drv := openDriver(t, root)
+	defer func() { _ = drv.Close() }()
+	sha := sha1hex("video")
+
+	const n = 5
+	for i := 0; i < n; i++ {
+		if err := mediaindex.AppendDanmaku(drv, sha, &mediaindex.Entry{
+			UserID: 1, UserName: "u", UserAvatar: "01",
+			Type: mediaindex.DanmakuTypeDanmaku, Offset: i * 1000, Content: "紧凑",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rel, _ := mediaindex.DanmakuRel(sha)
+	b, err := os.ReadFile(filepath.Join(root, ".mocca", filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	if len(lines) != n {
+		t.Errorf("追加 %d 条应正好 %d 行，got %d 行：%q", n, n, len(lines), string(b))
+	}
+	for _, l := range lines {
+		if l == "" {
+			t.Errorf("文件里有空行（每次追加都多补了一个换行）：%q", string(b))
+		}
 	}
 }
 

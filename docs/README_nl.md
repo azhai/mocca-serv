@@ -70,7 +70,7 @@ systeemomgevingsvariabelen met het voorvoegsel `MOCCA_`. Volgorde: ingebouwde st
 - **Beheerconsole** (alleen volledige build) —— ingebouwd, werkt offline: opslag, gebruikers, metadata, mapwachtwoorden en bulk-upload met een eigen voortgangsbalk per bestand.
 - **Accounts & rechten** —— beheerder / gebruiker / gast; een gebruiker ziet uitsluitend het eigen `base_path`; 12 vooraf ingestelde avatars (afbeeldingen uploaden wordt bewust niet ondersteund).
 - **Mapwachtwoorden** —— één keer instellen op een bovenliggende map en de hele substructuur (inclusief streaming) vraagt erom; opgeslagen als bcrypt.
-- **Reacties, danmaku, favorieten** —— reacties zonder lengtelimiet, danmaku max. 50 tekens en gesorteerd op afspeeltijd, favorieten per gebruiker zonder duplicaten.
+- **Reacties, danmaku, favorieten** —— reacties max. 500 tekens, danmaku max. 50 tekens en gesorteerd op afspeeltijd, favorieten per gebruiker zonder duplicaten.
 - **Beheer** —— `passwd` als noodoplossing, één statische binary, alle configuratie in `.env`.
 
 ## Licentie

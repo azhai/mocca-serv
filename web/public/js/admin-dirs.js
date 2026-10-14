@@ -6,6 +6,8 @@
 //     动作按钮按计数决定可用性 —— 没有视频就不会出现「补齐封面」「切分」「导出」；
 //   - 原来散在三个 Tab 的操作搬到这里：目录密码（目录级）、重新索引与数据迁移
 //     （目录级 + 媒体 Tab 的批量）、上传（目录级和媒体级）。
+//   - 弹幕与评论在媒体 Tab 行内审核：列目录顺带探出条数，非零才挂徽标与入口，
+//     弹层里逐条删、按类清空（五个 Tab 不因此加一个）。
 import m from './mithril.js';
 import { staticHash } from './static-hash.js';
 import { I } from './icons.js';
@@ -322,6 +324,7 @@ const MediaView = {
               ]),
         ]),
         m(UploadBox),
+        m(SocialPanel),
       ]),
     ]);
   },
@@ -491,10 +494,16 @@ function MediaRow(e) {
   const cut = isVid && !!e.hls;
   const isAud = e.type === KIND.audio;
   const coverable = isVid || isAud;
+  // 弹幕/评论条数：只有服务端探到非零才下发字段（admin-core 的 listDir 带 social:true）。
+  // 没这条数据就没得管，所以**徽标与按钮一起**只在 e.social 存在时给。
+  const soc = e.social;
   const dis = !!state.busy || st.busy;
   const acts = [];
   if (isVid || isAud || e.type === KIND.image || e.type === KIND.text)
     acts.push(ib({ icon: I.play, label: '在新标签页播放 / 预览', dis, onclick: () => openIn(p) }));
+  if (soc)
+    acts.push(ib({ icon: I.dm, label: `审核弹幕与评论（弹幕 ${soc.danmaku}、评论 ${soc.comments}）`,
+      dis, onclick: () => guard(() => openSocial(e)) }));
   if (isVid && !cut)
     acts.push(ib({ icon: I.cut, label: '切分旁路 HLS（-c copy，只切不转）', dis, busy: st.busy, onclick: () => guard(() => hlsWorker()(p)) }));
   if (coverable) {
@@ -518,7 +527,7 @@ function MediaRow(e) {
       checked: !!state.mediaSel[p], disabled: !!state.busy,
       onchange: ev => { state.mediaSel[p] = ev.target.checked; },
     })),
-    m('td.fname', { title: p }, [
+    m('td.fname' + (cut ? '.cut' : ''), { title: p }, [
       m('span.kindic', { class: kindClass(e) }, ico(kindIcon(e))),
       // 没拿到过封面的行不再发请求：无封面是常态（音频、新拷进来的片子），
       // 每次都拉一次 /meta/poster 只会把控制台塞满 404、把列表拉慢。
@@ -528,6 +537,8 @@ function MediaRow(e) {
       }) : null,
       m('span.nm', e.name),
       cut ? m('span.cutmark', { title: '已经有旁路清单（<目录>/.hls/…/index.m3u8），所以不再提供切分' }, '已切分') : null,
+      soc ? m('span.socialmark', { title: `弹幕 ${soc.danmaku} 条、评论 ${soc.comments} 条：点操作里的弹幕图标审核` },
+        `弹 ${soc.danmaku} · 评 ${soc.comments}`) : null,
     ]),
     m('td', fmtSize(e.size)),
     m('td', fmtTime(e.modified)),
@@ -536,3 +547,175 @@ function MediaRow(e) {
     m('td.actions', m('span.acts', acts)),
   ]);
 }
+
+/* ── 弹幕与评论审核（媒体 Tab 的行内弹层） ─────────────── */
+
+// 类型的取值与 mediaindex 的 iota 对齐（0 评论 / 1 弹幕）。这里只拿来决定
+// 确认框里说“删这条评论”还是“删这条弹幕”，所以写定两个数字，不在前端另外抄一份枚举。
+const DM_COMMENT = 0;
+
+// avatarURL 发送当时的头像快照 key → 预设头像直链（与 home.js、app.js 同一口径：
+// 服务端按 key 现画 SVG，这里只拼地址，不去 join 用户表）。
+const avatarURL = key => '/static/avatars/' + (key || '01') + '.png';
+
+// fmtOffset 弹幕出现的时刻：毫秒 → 分:秒（超过一小时才带上小时位）。
+// 取整跟 home.js 的播放器同口径（floor，不是四舍五入）：后台写 0:08、播放器跳过去显示 0:07，
+// 审核的人会以为错了时间；小时位是后台多给的，播放器只会把 3600 秒写成 60:00。
+function fmtOffset(ms) {
+  const t = Math.max(0, Math.floor((ms || 0) / 1000));
+  const p = x => String(x).padStart(2, '0');
+  const h = Math.floor(t / 3600), mnt = Math.floor((t % 3600) / 60);
+  return (h ? h + ':' + p(mnt) : mnt) + ':' + p(t % 60);
+}
+
+// openSocial 打开某媒体的审核弹层。行上的徽标就是入口：探到非零计数才有得管。
+async function openSocial(e) {
+  state.social = {
+    path: e.path || fullPath(e.name), name: e.name,
+    loading: true, err: '', sha1: '',
+    counts: { danmaku: 0, comments: 0 }, danmaku: [], comments: [],
+  };
+  m.redraw();
+  await reloadSocial();
+}
+
+function closeSocial() {
+  state.social = null;
+  // 显式重绘：Esc 路径上是 document 的原生监听，不经 mithril 的事件委托，
+  // 拿不到「每个 DOM 事件后自动重绘」—— 少这一句就是 state 清空了而遮罩还盖着整页（冒烟实测）。
+  m.redraw();
+}
+
+// reloadSocial 从服务端重读一屏。删一条与清一类之后都走它：计数是探出来的，
+// 不在前端自己减 1 —— 猜的数和读的数混在一起显示，错的时分不清是哪边。
+async function reloadSocial() {
+  const s = state.social;
+  if (!s) return;
+  s.loading = true; s.err = '';
+  try {
+    const d = await api('/fs/social', { method: 'POST', body: { path: s.path } });
+    s.sha1 = d.sha1 || '';
+    s.counts = d.counts || { danmaku: 0, comments: 0 };
+    // 服务端按写入顺序回（弹幕 jsonl 是追加的），面板标题说的是「按出现时刻」——
+    // 当场排一下才名实相符（不靠后端预排：后端只保证存/取，展示排序是前端的事）。
+    s.danmaku = (d.danmaku || []).slice().sort((a, b) => a.offset - b.offset);
+    s.comments = d.comments || [];
+    syncSocialBadge(s.path, s.counts);
+  } catch (e) {
+    s.err = e.message;
+  } finally {
+    s.loading = false;
+    // api() 走的是 fetch，mithril 不会自动重绘（只认 m.request）
+    m.redraw();
+  }
+}
+
+// syncSocialBadge 把行上的计数改成服务端刚给出的数。两类都归零就摘掉徽标：
+// 已清空还挂着个 “弹 3”，下次点进去是空的，比不标更误导。
+function syncSocialBadge(p, counts) {
+  const hit = (state.listing?.entries || []).find(e => (e.path || fullPath(e.name)) === p);
+  if (!hit) return;
+  hit.social = (counts.danmaku || counts.comments) ? counts : undefined;
+}
+
+// delSocialRow 删单条：复用浏览端的 DELETE /api/comments（管理员在 DeleteDanmaku 里
+// 按 isAdmin 放行，能删任何人的、弹幕或评论都行）—— 不为后台再开一条删除接口。
+async function delSocialRow(row) {
+  const s = state.social;
+  if (!s) return;
+  if (!confirm(`删除这条${row.type === DM_COMMENT ? '评论' : '弹幕'}？不可恢复。`)) return;
+  await api('/comments', { method: 'DELETE', body: { path: s.path, id: row.id } });
+  await reloadSocial();
+  say('已删除一条');
+}
+
+// clearSocial 按类型清空。kind 只认 danmaku / comment（后台不给“两类都清”的按钮：
+// 一次点错抹掉两种东西，不如分两次点）。
+async function clearSocial(kind, label) {
+  const s = state.social;
+  if (!s) return;
+  if (!confirm(`确认清空这部片子的全部${label}？整份重写，不可恢复。`)) return;
+  const d = await api('/fs/social/clear', { method: 'POST', body: { path: s.path, kind } });
+  await reloadSocial();
+  say(`已清空 ${d.cleared} 条${label}`);
+}
+
+// socialRow 一条记录：头像 + 昵称 + 时刻/标记 + 内容 + 发送时间 + 删除。
+function socialRow(e, tag, reply) {
+  const s = state.social;
+  return m('.srow' + (reply ? '.reply' : ''), [
+    m('img.savatar', { src: avatarURL(e.user_avatar), alt: '',
+      // 快照里的 key 已在新版头像表里换掉时回退到 01：拿不到图不能让一行审核没法读
+      onerror: ev => { ev.target.src = avatarURL('01'); } }),
+    m('span.sname', { title: `用户 #${e.user_id}（昵称为发送当时的快照）` }, e.user_name || `用户#${e.user_id}`),
+    tag ? m('span.stag', tag) : null,
+    m('span.scontent', e.content),
+    m('span.stime', fmtTime(e.created_at)),
+    m('button.iconbtn.danger', {
+      title: '删除这一条（不可恢复）', 'aria-label': '删除这一条',
+      disabled: !s || s.loading,
+      onclick: () => guard(() => delSocialRow(e)),
+    }, ico(I.trash)),
+  ]);
+}
+
+// onSocialEsc 必须是**模块级**的固定引用，不能写在 view 里。mithril 复用同一 DOM
+// 元素时只换 vnode.attrs、不会重跑 oncreate：闭包写在 view 里的话，第一次渲染挂上
+// 的是 f1，reloadSocial 那一次 m.redraw 把 attrs 换成 f2，onremove 解绑的就拿 f2 ——
+// f1 永久留在 document 上，以后在任何 Tab 按 Esc 都会白触发一次 closeSocial。
+function onSocialEsc(ev) {
+  // 判空 state.social：万一还有没解干净的监听器，也别让它去动别的页面的状态。
+  if (ev.key === 'Escape' && state.social) closeSocial();
+}
+
+// SocialPanel 审核弹层。临时视图，不写进 URL：刷新后回到原位指的是 Tab/目录/筛选，
+// 不是重新弹开一个审核窗。
+const SocialPanel = {
+  view() {
+    const s = state.social;
+    if (!s) return null;
+    const c = s.counts || { danmaku: 0, comments: 0 };
+    const busy = s.loading || !!state.busy;
+    return m('.social-mask', {
+      oncreate: () => document.addEventListener('keydown', onSocialEsc),
+      onremove: () => document.removeEventListener('keydown', onSocialEsc),
+    }, [
+      // 关闭挂在遮罩自己身上，面板是它的**兄弟**而不是子节点：面板里的点击因此
+      // 到不了关闭区（mithril 的事件委托到 document，在 handler 里读 ev.currentTarget
+      // 只会拿到 document，判不出人点的到底是哪一层）。
+      m('.social-bg', { onclick: closeSocial, 'aria-hidden': 'true' }),
+      m('.social-panel', { role: 'dialog', 'aria-modal': 'true', 'aria-label': '弹幕与评论管理' }, [
+        m('.social-head', [
+          m('h3', [ico(I.dm), m('span', '弹幕与评论'), m('code.path', s.name)]),
+          m('button.iconbtn.ghost', { title: '关闭（Esc）', 'aria-label': '关闭', onclick: closeSocial }, ico(I.close)),
+        ]),
+        m('.row.social-sum', [
+          m('span.muted', `弹幕 ${c.danmaku} 条`),
+          c.danmaku ? m('button.ghost.sm.danger', {
+            disabled: busy, title: '只清弹幕，评论保留；整份重写，不可恢复',
+            onclick: () => guard(() => clearSocial('danmaku', '弹幕')) }, '清空弹幕') : null,
+          m('span.muted', `评论 ${c.comments} 条（含回复）`),
+          c.comments ? m('button.ghost.sm.danger', {
+            disabled: busy, title: '只清评论（连回复一起），弹幕保留；整份重写，不可恢复',
+            onclick: () => guard(() => clearSocial('comment', '评论')) }, '清空评论') : null,
+        ]),
+        m('p.muted', '弹幕与评论都按内容指纹锁定（' + (s.sha1 ? s.sha1.slice(0, 12) + '…' : '—')
+          + '），存在该存储的 .mocca 里：改名、移动都不会丢。'),
+        s.err ? m('p.err', s.err) : null,
+        busy ? m('p.muted.running', [ico(I.refresh, 'spin'), ' 读取中…']) : [
+          m('h4', '弹幕（按出现时刻）'),
+          s.danmaku.length
+            ? m('.social-list', s.danmaku.map(e => socialRow(e, fmtOffset(e.offset))))
+            : m('p.muted', '这部片子还没有弹幕。'),
+          m('h4', '评论（最新在上）'),
+          s.comments.length
+            ? m('.social-list', s.comments.map(t => [
+              socialRow(t, '', false),
+              (t.replies || []).map(r => socialRow(r, '回复', true)),
+            ]))
+            : m('p.muted', '这部片子还没有评论。'),
+        ],
+      ]),
+    ]);
+  },
+};

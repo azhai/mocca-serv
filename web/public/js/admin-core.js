@@ -34,6 +34,7 @@ export const state = {
   pwdAsk: null,    // 正在等口令的层：{path, resolve, reject}（见 requestPwd）
   noCover: {},     // path -> true：拉海报拿到过 404 = 本就没有封面，不再反复请求刷控制台
   dirsSeen: new Map(), // 发现过的目录 path -> name：给「用户·专属目录」当候选
+  social: null,    // 弹幕/评论审核弹层：{path, name, err, loading, counts, danmaku, comments}
 
   // 媒体 Tab
   mediaFilter: 'all', // all | 2 | 3 | 5 | 4（按 KIND 值过滤）
@@ -206,9 +207,11 @@ export function isRealDir(p) {
 //
 // hls:true 让服务端顺带探出这一层哪些片子**已经有旁路清单**（条目上的 hls 字段）：
 // 媒体 Tab 据此把「切分」入口收掉，不再对着切过的片子提供第二次切分。
-// 只有后台要这个信息，所以探测开关由这里显式打开（APP 不传 = 不付读成本）。
+// social:true 同理探每个媒体的弹幕/评论条数（条目上的 social 字段），媒体 Tab 据此挂
+// 计数徽标与审核入口。
+// 两个探测都是默认关的：只有后台要这个信息，所以由这里显式打开（APP 不传 = 不付读成本）。
 export async function listDir(p) {
-  const body = { path: p, hls: true };
+  const body = { path: p, hls: true, social: true };
   const pw = pwdOf(p);
   if (pw) body.password = pw;
   try {
@@ -216,7 +219,7 @@ export async function listDir(p) {
   } catch (e) {
     if (!/需要密码/.test(e.message)) throw e;
     const hash = await requestPwd(p);
-    return api('/fs/list', { method: 'POST', body: { path: p, password: hash, hls: true } });
+    return api('/fs/list', { method: 'POST', body: { path: p, password: hash, hls: true, social: true } });
   }
 }
 
@@ -274,6 +277,7 @@ export async function selectDir(p) {
   state.mediaSel = {};
   state.fileState = {};
   state.upload = { files: [], busy: false };
+  state.social = null; // 换层就把审核弹层收掉：它还挂在上一层那个文件上
   state.listing = null;
   m.redraw();
   try {
@@ -318,7 +322,10 @@ export function restoreURL(tabs) {
 }
 
 // goTab / setKindFilter：改状态并同步地址。直接给 state.page 赋值的地方，刷新后就丢了。
-export function goTab(key) { state.page = key; syncURL(); }
+// goTab 切页时一并收掉弹幕审核弹层：它是媒体页的临时视图，state.social 不清的话，
+// 不关面板直接切走、再切回来时它会自己弹回来（和 selectDir 里那条是同一条意图：
+// 面板挂在哪个文件上，就得在那个文件那一层里关掉）。
+export function goTab(key) { state.page = key; state.social = null; syncURL(); }
 export function setKindFilter(v) { state.mediaFilter = v; syncURL(); }
 
 // ensureSelVisible 把 URL 里带回来的深层目录上面的层逐层展开：不展开的话树停在
