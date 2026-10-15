@@ -42,5 +42,9 @@ bus 从未用过）。目标还有跨进程：本机高频、丢几条无所谓�
   节点、盖掉重定向；已改成「中间连续斜杠忽略、尾斜杠保留语义」，与 echo 默认一致。这类差异靠
   `routes_test`/`embed_test` 的既有断言暴露，不是靠人工比对 echo 源码保证。
 - **天花板（ponytail 标注）**：Windows 无共享内存快路径，退回 Journal（吞吐低、无内存序保证，只做「能用」）；
-  mq 后端目前是**已就绪、已测，但尚未接入真实消费者**的能力，接线（替换 danmaku_hub / 索引通知）是后续独立切片。
+  接入进度：`Bus` 已接进 `mediaindex/danmaku_hub.go`（topic=存储键+sha1，一条弹幕只 marshal 一次、
+  多观看者共享字节，替掉了旧自建 hub 的每连接重复序列化）；`Journal` 已接进 `mediaindex/danmaku_bridge.go`
+  作**多实例弹幕跨进程桥**（默认关，配 `DANMAKU_JOURNAL_DIR` 才开）：受 Journal 单写者约束，每个实例写
+  自己那份 `danmaku-<pid>-<rand>.journal`、只 tail 别人的（天然无回环、无需 origin 标记；首次发现即移到末尾只投新不重放）。
+  单进程部署热路径零成本（bridge 为 nil 时 PublishDanmaku 的落盘是 no-op）。`Shm` 仍是已就绪、已测但尚无真实消费者的能力。
 - 与 ADR 0006 不冲突：Go 仍是权威实现，本次转写评估未变；lib/web/lib/mq 是 Go 库替换 Go 库，不是转 Odin。

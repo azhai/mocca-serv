@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 
@@ -31,11 +30,14 @@ func DanmakuStream(c *web.Context) error {
 	storageID := drv.Identity()
 	_ = drv.Close() // 订阅只用到"哪块盘 + 哪个视频"，别把驱动（尤其 SMB 连接）占在整个长连接上
 
-	ch, cancel := mediaindex.SubscribeDanmaku(storageID, sha)
-	defer cancel()
+	sub, err := mediaindex.SubscribeDanmaku(storageID, sha)
+	if err != nil {
+		return helpers.Fail(c, helpers.CodeInternal, "订阅弹幕失败")
+	}
+	defer sub.Cancel()
 
 	w := c.Response()
-	// echo v5 的 Response() 是 http.ResponseWriter，刷新要自己断言成 http.Flusher。
+	// lib/web 的 Response() 是 http.ResponseWriter，刷新要自己断言成 http.Flusher。
 	// 拿不到（比如被某个中间件包成了不支持刷新的 writer）就只能不刷 —— 弹幕会攒着一起到，
 	// 但连接本身仍然正常。
 	flush := func() {
@@ -50,7 +52,6 @@ func DanmakuStream(c *web.Context) error {
 	w.WriteHeader(http.StatusOK)
 	flush()
 
-	enc := json.NewEncoder(w)
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
@@ -58,20 +59,20 @@ func DanmakuStream(c *web.Context) error {
 		select {
 		case <-c.Request().Context().Done():
 			return nil // 客户端断开（关页面、切视频）
-		case e, ok := <-ch:
-			if !ok {
-				return nil
-			}
+		case m := <-sub.C():
+			// Body 已是发布方编码好的弹幕 JSON（一条只 marshal 一次），这里直接拼 SSE 帧写出。
 			if _, err := w.Write([]byte("event: danmaku\ndata: ")); err != nil {
 				return nil
 			}
-			if err := enc.Encode(e); err != nil {
+			if _, err := w.Write(m.Body); err != nil {
 				return nil
 			}
-			if _, err := w.Write([]byte("\n")); err != nil {
+			if _, err := w.Write([]byte("\n\n")); err != nil {
 				return nil
 			}
 			flush()
+		case <-sub.Done():
+			return nil // 订阅结束（总线关闭等）
 		case <-ticker.C:
 			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
 				return nil

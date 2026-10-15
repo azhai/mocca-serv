@@ -163,6 +163,18 @@ func main() {
 		log.Printf("文件监控（FS Watch）未开启，可在后台「全局选项」打开")
 	}
 
+	// 弹幕跨进程桥：默认关。只有把 mocca 放进反向代理后跑 2+ 个实例、配了
+	// DANMAKU_JOURNAL_DIR 才启用，让各实例间的实时弹幕经 lib/mq.Journal 互推
+	// （单进程用不到：进程内 Bus 已扇出；见 mediaindex/danmaku_bridge.go）。
+	if cfg.DanmakuJournalDir != "" {
+		if err := mediaindex.StartDanmakuBridge(cfg.DanmakuJournalDir); err != nil {
+			log.Printf("启用弹幕跨进程桥失败（多实例间实时弹幕将互不可见）: %v", err)
+		} else {
+			defer mediaindex.StopDanmakuBridge()
+			log.Printf("弹幕跨进程桥已开启，目录 %s", cfg.DanmakuJournalDir)
+		}
+	}
+
 	helpers.GoSafe("http 服务", func() {
 		log.Printf("mocca 监听 %s（数据目录 %s）", cfg.Addr, cfg.DataDir)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

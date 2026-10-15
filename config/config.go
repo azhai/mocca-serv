@@ -35,6 +35,9 @@ const (
 	keyTmdbKey       = "TMDB_KEY"
 	keyTmdbLang      = "TMDB_LANG"
 	keyTmdbProxy     = "TMDB_PROXY"
+	// keyDanmakuJournal 弹幕跨进程桥的目录：仅当反向代理后跑 2+ 个 mocca 实例时才配。
+	// 留空＝不启用桥（单进程默认），启用后各实例在此目录下各写一份弹幕 journal、互相 tail。
+	keyDanmakuJournal = "DANMAKU_JOURNAL_DIR"
 )
 
 // DefaultTmdbLang 刮削缺省语言：中文简介与译名。
@@ -60,6 +63,9 @@ type Config struct {
 	// 是不生效的；要走代理且在 .env 里配，就写这个 TMDB_PROXY。
 	TmdbProxy string
 
+	// DanmakuJournalDir 弹幕跨进程桥目录，默认空＝关闭。多实例部署 SSE 才需要（见 mediaindex 桥）。
+	DanmakuJournalDir string
+
 	EnvFile   string // 实际读取的配置文件路径
 	EnvLoaded bool   // 该文件确实存在且读取成功
 }
@@ -84,6 +90,7 @@ var Cfg *Config
 //	TMDB_KEY       / MOCCA_TMDB_KEY        TMDB 密钥（可空＝不启用刮削）
 //	TMDB_LANG      / MOCCA_TMDB_LANG       刮削语言，缺省 zh-CN
 //	TMDB_PROXY     / MOCCA_TMDB_PROXY      刮削出网代理（如 http://127.0.0.1:7890），留空＝直连
+//	DANMAKU_JOURNAL_DIR / MOCCA_DANMAKU_JOURNAL_DIR  弹幕跨进程桥目录，留空＝关闭（仅多实例部署需要）
 func Load() (*Config, error) {
 	path := envFilePath()
 	env, loaded, err := loadEnv(path)
@@ -92,17 +99,18 @@ func Load() (*Config, error) {
 	}
 
 	Cfg = &Config{
-		Addr:           pick(env, keyAddr, ":8000"),
-		DataDir:        pick(env, keyDataDir, "data"),
-		JWTSecret:      pick(env, keyJWTSecret, "mocca-dev-secret"),
-		AdminPassword:  pick(env, keyAdminPassword, DefaultAdminPassword),
-		TmdbAPIKey:     pick(env, keyTmdbKey, ""),
-		TmdbLang:       pick(env, keyTmdbLang, DefaultTmdbLang),
-		TmdbProxy:      pick(env, keyTmdbProxy, ""),
-		TokenExpiresIn: 48,   // 暂未开放成配置项
-		AllowRegister:  true, // 暂未开放成配置项
-		EnvFile:        path,
-		EnvLoaded:      loaded,
+		Addr:              pick(env, keyAddr, ":8000"),
+		DataDir:           pick(env, keyDataDir, "data"),
+		JWTSecret:         pick(env, keyJWTSecret, "mocca-dev-secret"),
+		AdminPassword:     pick(env, keyAdminPassword, DefaultAdminPassword),
+		TmdbAPIKey:        pick(env, keyTmdbKey, ""),
+		TmdbLang:          pick(env, keyTmdbLang, DefaultTmdbLang),
+		TmdbProxy:         pick(env, keyTmdbProxy, ""),
+		DanmakuJournalDir: pick(env, keyDanmakuJournal, ""),
+		TokenExpiresIn:    48,   // 暂未开放成配置项
+		AllowRegister:     true, // 暂未开放成配置项
+		EnvFile:           path,
+		EnvLoaded:         loaded,
 	}
 
 	if abs, err := filepath.Abs(Cfg.DataDir); err == nil {
