@@ -8,12 +8,12 @@ import (
 	"testing"
 
 	"github.com/azhai/mocca/handlers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // mediaFixture 挂一个含视频与音频的本地存储。
-func mediaFixture(t *testing.T, e *echo.Echo) {
+func mediaFixture(t *testing.T, e *web.Echo) {
 	t.Helper()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "v.mp4"), []byte("video-bytes"))
@@ -22,7 +22,7 @@ func mediaFixture(t *testing.T, e *echo.Echo) {
 }
 
 // rawURLOf 走 /api/fs/get 取播放地址。token 为空即游客。
-func rawURLOf(t *testing.T, e *echo.Echo, path, token string) string {
+func rawURLOf(t *testing.T, e *web.Echo, path, token string) string {
 	t.Helper()
 	code, resp := call(t, e, http.MethodPost, "/api/fs/get", `{"path":"`+path+`"}`, token)
 	if code != 200 {
@@ -37,7 +37,7 @@ func rawURLOf(t *testing.T, e *echo.Echo, path, token string) string {
 }
 
 // serveRaw 按播放器的方式请求该地址：**不带任何请求头**，凭证只能来自 URL 本身。
-func serveRaw(t *testing.T, e *echo.Echo, raw string, hdr map[string]string) *httptest.ResponseRecorder {
+func serveRaw(t *testing.T, e *web.Echo, raw string, hdr map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, raw, nil)
 	for k, v := range hdr {

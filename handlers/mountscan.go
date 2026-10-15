@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/azhai/mocca/helpers"
-	"github.com/labstack/echo/v5"
+	web "github.com/azhai/mocca/lib/web"
 )
 
 // MountCandidate 是扫描到的疑似外接设备挂载点，可直接填进存储的 root_folder_path。
@@ -26,7 +26,7 @@ type MountCandidate struct {
 
 // ScanMounts 自动发现外接设备根目录。仅管理员可用；找不到就返回空列表，
 // 由前端退回手工填写。
-func ScanMounts(c *echo.Context) error {
+func ScanMounts(c *web.Context) error {
 	list, err := scanExternalMounts()
 	if err != nil {
 		return helpers.Fail(c, helpers.CodeInternal, "扫描挂载点失败："+err.Error())

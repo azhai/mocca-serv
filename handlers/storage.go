@@ -2,8 +2,8 @@ package handlers
 
 import (
 	"github.com/azhai/mocca/helpers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // StorageReq 挂载点请求。Addition 是驱动私有配置的 JSON 文本，
@@ -19,7 +19,7 @@ type StorageReq struct {
 }
 
 // ListStorage 列出全部挂载点。
-func ListStorage(c *echo.Context) error {
+func ListStorage(c *web.Context) error {
 	all, err := models.ListStorages()
 	if err != nil {
 		return helpers.Fail(c, helpers.CodeInternal, "读取存储失败")
@@ -28,7 +28,7 @@ func ListStorage(c *echo.Context) error {
 }
 
 // CreateStorage 新增挂载点。
-func CreateStorage(c *echo.Context) error {
+func CreateStorage(c *web.Context) error {
 	var req StorageReq
 	if err := c.Bind(&req); err != nil {
 		return helpers.Fail(c, helpers.CodeBadRequest, "请求参数有误")
@@ -54,7 +54,7 @@ func CreateStorage(c *echo.Context) error {
 }
 
 // UpdateStorage 修改挂载点。
-func UpdateStorage(c *echo.Context) error {
+func UpdateStorage(c *web.Context) error {
 	var req StorageReq
 	if err := c.Bind(&req); err != nil {
 		return helpers.Fail(c, helpers.CodeBadRequest, "请求参数有误")
@@ -81,7 +81,7 @@ func UpdateStorage(c *echo.Context) error {
 }
 
 // DeleteStorage 删除挂载点。
-func DeleteStorage(c *echo.Context) error {
+func DeleteStorage(c *web.Context) error {
 	var req struct {
 		ID uint `json:"id"`
 	}

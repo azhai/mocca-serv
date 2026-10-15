@@ -1,6 +1,6 @@
 package helpers
 
-import "github.com/labstack/echo/v5"
+import web "github.com/azhai/mocca/lib/web"
 
 // 业务错误码。
 //
@@ -23,7 +23,7 @@ type Resp struct {
 }
 
 // OK 成功响应；不传 data 时为 null。
-func OK(c *echo.Context, data ...any) error {
+func OK(c *web.Context, data ...any) error {
 	var d any
 	if len(data) > 0 {
 		d = data[0]
@@ -32,7 +32,7 @@ func OK(c *echo.Context, data ...any) error {
 }
 
 // Fail 失败响应，HTTP 仍是 200。
-func Fail(c *echo.Context, code int, msg string) error {
+func Fail(c *web.Context, code int, msg string) error {
 	return c.JSON(200, Resp{Code: code, Message: msg})
 }
 
@@ -42,6 +42,6 @@ func Fail(c *echo.Context, code int, msg string) error {
 // 播放器不看信封、只认状态码。失败若回 HTTP 200，播放器会把那段 JSON
 // 当成媒体数据去解码，最终报出来的错（格式不支持之类）与真实原因无关，
 // 排查时会被彻底带偏。
-func FailStatus(c *echo.Context, code int, msg string) error {
+func FailStatus(c *web.Context, code int, msg string) error {
 	return c.JSON(code, Resp{Code: code, Message: msg})
 }

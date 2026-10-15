@@ -17,12 +17,12 @@ import (
 	"testing"
 	"time"
 
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // callRaw 与 call 同源，但额外返回原始响应体，用于断言「字段是否存在/类型」。
-func callRaw(t *testing.T, e *echo.Echo, method, path, body, token string) (int, map[string]any, string) {
+func callRaw(t *testing.T, e *web.Echo, method, path, body, token string) (int, map[string]any, string) {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

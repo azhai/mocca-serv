@@ -5,7 +5,7 @@ import (
 	"strconv"
 
 	"github.com/azhai/mocca/helpers"
-	"github.com/labstack/echo/v5"
+	web "github.com/azhai/mocca/lib/web"
 )
 
 // DefaultMaxBody 单请求体积上限（1GB）。
@@ -14,12 +14,12 @@ const DefaultMaxBody int64 = 1 << 30
 
 // BodyLimit 限制请求体大小：超限直接 413，并在读取时二次兜底
 // （有些客户端不报 Content-Length，只靠头部判断会被绕过）。
-func BodyLimit(max int64) echo.MiddlewareFunc {
+func BodyLimit(max int64) web.MiddlewareFunc {
 	if max <= 0 {
 		max = DefaultMaxBody
 	}
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c *echo.Context) error {
+	return func(next web.HandlerFunc) web.HandlerFunc {
+		return func(c *web.Context) error {
 			req := c.Request()
 			if req.ContentLength > max {
 				return helpers.Fail(c, helpers.CodeBadRequest,

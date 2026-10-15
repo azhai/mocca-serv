@@ -2,15 +2,15 @@ package middlewares
 
 import (
 	"github.com/azhai/mocca/helpers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // AdminMiddleware 要求登录**且**是管理员：先校验令牌，再查库确认角色。
 // 角色不放进令牌，避免改权限后旧令牌仍带着旧角色。
-func AdminMiddleware(secret string) echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c *echo.Context) error {
+func AdminMiddleware(secret string) web.MiddlewareFunc {
+	return func(next web.HandlerFunc) web.HandlerFunc {
+		return func(c *web.Context) error {
 			tok := tokenFrom(c)
 			if tok == "" {
 				return helpers.Fail(c, helpers.CodeUnauthorized, "未登录")

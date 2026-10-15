@@ -14,14 +14,14 @@ import (
 	"strings"
 	"testing"
 
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/mediaindex"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // exportPost 以**原始字节**方式请求导出接口。
 // 不能用 call()：那把响应体当 JSON 解析，而这里正常时是二进制 tar.gz。
-func exportPost(t *testing.T, e *echo.Echo, body, token string) *httptest.ResponseRecorder {
+func exportPost(t *testing.T, e *web.Echo, body, token string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/fs/export", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

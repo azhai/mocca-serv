@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // addStorage 挂一个本地存储，root 为实际目录。
@@ -27,7 +27,7 @@ func addStorage(t *testing.T, mount, driver, root string) {
 }
 
 // postFiles 构造 multipart 上传请求并打到指定路径。
-func postFiles(t *testing.T, e *echo.Echo, url, token string,
+func postFiles(t *testing.T, e *web.Echo, url, token string,
 	field string, files map[string]string) (int, map[string]any) {
 	t.Helper()
 

@@ -6,13 +6,13 @@ import (
 	"strings"
 	"testing"
 
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // socialFixture 造一个「有索引的视频 + 2 条弹幕 + 1 条评论 + 1 条回复」的环境。
 // 返回管理员令牌、普通用户令牌、媒体路径，以及那条顶层评论的 ID（回复挂它上面）。
-func socialFixture(t *testing.T, e *echo.Echo) (admin, fan, filePath, topID string) {
+func socialFixture(t *testing.T, e *web.Echo) (admin, fan, filePath, topID string) {
 	t.Helper()
 	_, filePath = danmakuFixtures(t)
 	admin = makeUser(t, e, "root", "p", models.RoleAdmin)
@@ -42,7 +42,7 @@ func socialFixture(t *testing.T, e *echo.Echo) (admin, fan, filePath, topID stri
 }
 
 // socialOf 取列表条目上的 social 计数（name -> {danmaku, comments}），顺带回原始响应体。
-func socialOf(t *testing.T, e *echo.Echo, body string) (map[string][2]int, string) {
+func socialOf(t *testing.T, e *web.Echo, body string) (map[string][2]int, string) {
 	t.Helper()
 	code, resp, raw := callRaw(t, e, http.MethodPost, "/api/fs/list", body, "")
 	if code != 200 {

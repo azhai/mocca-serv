@@ -7,12 +7,12 @@ import (
 	"testing"
 
 	"github.com/azhai/mocca/handlers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // listNames 调 fs/list 并返回名字集合。
-func listNames(t *testing.T, e *echo.Echo, path, token string) map[string]bool {
+func listNames(t *testing.T, e *web.Echo, path, token string) map[string]bool {
 	t.Helper()
 	code, resp := call(t, e, http.MethodPost, "/api/fs/list", `{"path":"`+path+`"}`, token)
 	if code != 200 {

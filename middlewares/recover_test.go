@@ -10,12 +10,12 @@ import (
 	"testing"
 
 	"github.com/azhai/mocca/helpers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/middlewares"
-	"github.com/labstack/echo/v5"
 )
 
 // newPanicEcho 起一个只会在 handler 里 panic 的应用，错误日志指向临时目录。
-func newPanicEcho(t *testing.T, route string) (*echo.Echo, string) {
+func newPanicEcho(t *testing.T, route string) (*web.Echo, string) {
 	t.Helper()
 	dir := t.TempDir()
 	if err := helpers.OpenErrorLog(dir); err != nil {
@@ -23,9 +23,9 @@ func newPanicEcho(t *testing.T, route string) (*echo.Echo, string) {
 	}
 	t.Cleanup(func() { _ = helpers.CloseErrorLog() })
 
-	e := echo.New()
+	e := web.New()
 	e.Use(middlewares.RecoverLog())
-	e.GET(route, func(c *echo.Context) error {
+	e.GET(route, func(c *web.Context) error {
 		var nilMap map[string]string
 		nilMap["boom"] = "写进 nil map 必 panic"
 		return nil

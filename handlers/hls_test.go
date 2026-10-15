@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/mediaindex"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // hlsFixture 造一个含视频的本地存储，返回存储根目录。
-func hlsFixture(t *testing.T, e *echo.Echo) string {
+func hlsFixture(t *testing.T, e *web.Echo) string {
 	t.Helper()
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "v.mp4"), []byte("video-bytes"))
@@ -90,7 +90,7 @@ func TestFsGetExposesHLSURL(t *testing.T) {
 }
 
 // listHLS 列目录并返回 name → hls（缺字段按 false），同时把原始响应带回来供「根本没探测」的断言用。
-func listHLS(t *testing.T, e *echo.Echo, body string) (map[string]bool, string) {
+func listHLS(t *testing.T, e *web.Echo, body string) (map[string]bool, string) {
 	t.Helper()
 	code, resp, raw := callRaw(t, e, http.MethodPost, "/api/fs/list", body, "")
 	if code != 200 {

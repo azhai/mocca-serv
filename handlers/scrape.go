@@ -10,10 +10,10 @@ import (
 	"github.com/azhai/mocca/config"
 	"github.com/azhai/mocca/drivers"
 	"github.com/azhai/mocca/helpers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/mediaindex"
 	"github.com/azhai/mocca/models"
 	"github.com/azhai/mocca/tmdb"
-	"github.com/labstack/echo/v5"
 )
 
 // 刮削（scrape）分两步走，与「先检索、再选一条」的实际操作一致：
@@ -112,7 +112,7 @@ func tmdbClient() (*tmdb.Client, error) {
 //
 // 关键词优先用请求里给的；没给就按文件名猜。猜出来的年份只用于收窄，
 // 若带年份查不到，客户端会自动去掉年份重查一次（见 tmdb.Client.Search）。
-func ScrapeSearch(c *echo.Context) error {
+func ScrapeSearch(c *web.Context) error {
 	var req ScrapeReq
 	if err := c.Bind(&req); err != nil || req.Path == "" {
 		return helpers.Fail(c, helpers.CodeBadRequest, "请求参数有误")
@@ -208,7 +208,7 @@ func fetchTopDetails(ctx context.Context, cli *tmdb.Client, list []tmdb.Candidat
 
 // ScrapeApply 应用一条 TMDB 结果：写附加信息（简介/导演/年份/地区/出品方/语言/主演）
 // 与封面（海报裁成 400×300），并顺带重扫所在目录让 is_new 立刻翻转。
-func ScrapeApply(c *echo.Context) error {
+func ScrapeApply(c *web.Context) error {
 	var req ScrapeApplyReq
 	if err := c.Bind(&req); err != nil || req.Path == "" || req.TmdbID <= 0 {
 		return helpers.Fail(c, helpers.CodeBadRequest, "请求参数有误")

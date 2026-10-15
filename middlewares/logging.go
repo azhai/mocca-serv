@@ -4,7 +4,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/labstack/echo/v5"
+	web "github.com/azhai/mocca/lib/web"
 )
 
 // RequestLogger 记录每个请求的方法、路径、耗时与错误。
@@ -15,9 +15,9 @@ import (
 // 注：这里不记 HTTP 状态码 —— echo v5 的 c.Response() 是 http.ResponseWriter，
 // 读不到已写入的状态码，要记就得自己包一层 ResponseWriter，不值得。
 // 业务成败本来也在响应体的 code 字段里。
-func RequestLogger(slowThreshold time.Duration) echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c *echo.Context) error {
+func RequestLogger(slowThreshold time.Duration) web.MiddlewareFunc {
+	return func(next web.HandlerFunc) web.HandlerFunc {
+		return func(c *web.Context) error {
 			start := time.Now()
 			err := next(c)
 			cost := time.Since(start)

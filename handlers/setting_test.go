@@ -5,12 +5,12 @@ import (
 	"testing"
 
 	"github.com/azhai/mocca/handlers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // loginAs 注册（首个即管理员）并登录，返回令牌。
-func loginAs(t *testing.T, e *echo.Echo, name string) string {
+func loginAs(t *testing.T, e *web.Echo, name string) string {
 	t.Helper()
 	if code, _ := call(t, e, http.MethodPost, "/api/auth/register",
 		`{"username":"`+name+`","password":"`+pwdHash("p")+`"}`, ""); code != 200 {

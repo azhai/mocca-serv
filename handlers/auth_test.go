@@ -10,13 +10,13 @@ import (
 	"testing"
 
 	"github.com/azhai/mocca/config"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
 	"github.com/azhai/mocca/routes"
-	"github.com/labstack/echo/v5"
 )
 
 // newApp 起一个带临时库的完整应用。
-func newApp(t *testing.T) *echo.Echo {
+func newApp(t *testing.T) *web.Echo {
 	t.Helper()
 	dir := t.TempDir()
 	config.Cfg = &config.Config{
@@ -33,7 +33,7 @@ func newApp(t *testing.T) *echo.Echo {
 	}
 	t.Cleanup(func() { _ = models.Close() })
 
-	e := echo.New()
+	e := web.New()
 	routes.SetupAPIRoutes(e)
 	// 管理接口单独注册：纯 API 构建（-tags noweb）里 SetupAPIRoutes 不挂它们，
 	// 但处理器本身两种构建都编译。测试要覆盖的是处理器逻辑，所以无条件补上 ——
@@ -43,7 +43,7 @@ func newApp(t *testing.T) *echo.Echo {
 }
 
 // call 发起一次请求并解析信封。
-func call(t *testing.T, e *echo.Echo, method, path, body, token string) (int, map[string]any) {
+func call(t *testing.T, e *web.Echo, method, path, body, token string) (int, map[string]any) {
 	t.Helper()
 	var reader *strings.Reader
 	if body == "" {

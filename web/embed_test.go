@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	mweb "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/web"
-	"github.com/labstack/echo/v5"
 )
 
 // public/ 的目录结构（改结构时同步改这里）：
@@ -41,7 +41,7 @@ func readAsset(t *testing.T, name string) string {
 
 // TestHomeServedAtRoot 浏览应用是站点根：/ 必须直接给出页面。
 func TestHomeServedAtRoot(t *testing.T) {
-	e := echo.New()
+	e := mweb.New()
 	if err := web.Register(e, "/admin"); err != nil {
 		t.Fatalf("挂载页面失败: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestHomeServedAtRoot(t *testing.T) {
 
 // TestAdminServedAtAdminRoot 后台挂在 /admin/ 下，且 /admin 要被引导到规范入口。
 func TestAdminServedAtAdminRoot(t *testing.T) {
-	e := echo.New()
+	e := mweb.New()
 	if err := web.Register(e, "/admin"); err != nil {
 		t.Fatalf("挂载页面失败: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestAdminServedAtAdminRoot(t *testing.T) {
 // TestStaticAssetsServed 拆出去的 css/ 与 js/ 必须能通过 HTTP 取到，
 // 否则两个页面引用了绝对路径却拿到 404，就是白屏。
 func TestStaticAssetsServed(t *testing.T) {
-	e := echo.New()
+	e := mweb.New()
 	if err := web.Register(e, "/admin"); err != nil {
 		t.Fatalf("挂载页面失败: %v", err)
 	}
@@ -158,13 +158,13 @@ func TestStaticAssetsServed(t *testing.T) {
 // 必须确认它没有吃掉接口路由（/api/*、/d/*、/static/avatars/:key）。
 // 静态/参数路由的优先级高于通配，这里把生产里真实的路由形态复刻一遍。
 func TestAPIRoutesNotShadowed(t *testing.T) {
-	e := echo.New()
+	e := mweb.New()
 	// 与 main.go 同序：先接口，后页面
-	e.GET("/api/ping", func(c *echo.Context) error { return c.String(http.StatusOK, "pong") })
-	e.GET("/static/avatars/:key", func(c *echo.Context) error {
-		return c.String(http.StatusOK, "avatar:"+c.Param("key"))
+	e.GET("/api/ping", func(c *mweb.Context) error { return c.String(http.StatusOK, "pong") })
+	e.GET("/static/avatars/:key", func(c *mweb.Context) error {
+		return c.String(http.StatusOK, "avatar:%s", c.Param("key"))
 	})
-	e.GET("/d/*path", func(c *echo.Context) error { return c.String(http.StatusOK, "dl") })
+	e.GET("/d/*path", func(c *mweb.Context) error { return c.String(http.StatusOK, "dl") })
 	if err := web.Register(e, "/admin"); err != nil {
 		t.Fatalf("挂载页面失败: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestFSStripsPrefix(t *testing.T) {
 // 表现就是「前端改了，页面毫无变化」，且反复排查源码也找不出问题。
 // 补上按内容算的 ETag 后，改了就立刻生效，没变则回 304。
 func TestAssetsRevalidate(t *testing.T) {
-	e := echo.New()
+	e := mweb.New()
 	if err := web.Register(e, "/admin"); err != nil {
 		t.Fatalf("挂载页面失败: %v", err)
 	}

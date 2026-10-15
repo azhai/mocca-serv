@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/azhai/mocca/helpers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/mediaindex"
-	"github.com/labstack/echo/v5"
 )
 
 // DanmakuStream SSE：把某个媒体的**新**弹幕实时推给正在看它的人。
@@ -19,7 +19,7 @@ import (
 //   - **token 走查询串**：浏览器的 EventSource 不能带自定义请求头，所以鉴权只能靠
 //     `?token=`（middlewares.TokenFrom 已经支持这种取法）；
 //   - **心跳**：反向代理和浏览器都会掐掉长时间空闲的连接，15 秒一行注释帧足够保活。
-func DanmakuStream(c *echo.Context) error {
+func DanmakuStream(c *web.Context) error {
 	mediaPath := c.QueryParam("path")
 	if mediaPath == "" {
 		return helpers.Fail(c, helpers.CodeBadRequest, "缺少 path")

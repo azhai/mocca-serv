@@ -6,9 +6,9 @@ import (
 
 	"github.com/azhai/mocca/config"
 	"github.com/azhai/mocca/helpers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/middlewares"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 	"github.com/pkg/errors"
 )
 
@@ -56,7 +56,7 @@ type InitStatus struct {
 //
 // 首启引导：库中还没有任何账号时，第一个注册者直接成为管理员。
 // 否则新装的服务无人能触达管理员接口，连存储都配不了。
-func Register(c *echo.Context) error {
+func Register(c *web.Context) error {
 	var req LoginReq
 	if err := c.Bind(&req); err != nil {
 		return helpers.Fail(c, helpers.CodeBadRequest, "请求参数有误")
@@ -103,7 +103,7 @@ func Register(c *echo.Context) error {
 }
 
 // InitStatusHandler 公开的初始化状态。
-func InitStatusHandler(c *echo.Context) error {
+func InitStatusHandler(c *web.Context) error {
 	count, err := models.CountUsers()
 	if err != nil {
 		return helpers.Fail(c, helpers.CodeInternal, "初始化检查失败")
@@ -115,7 +115,7 @@ func InitStatusHandler(c *echo.Context) error {
 }
 
 // LoginHash 静态哈希登录，返回 JWT。
-func LoginHash(c *echo.Context) error {
+func LoginHash(c *web.Context) error {
 	var req LoginReq
 	if err := c.Bind(&req); err != nil {
 		return helpers.Fail(c, helpers.CodeBadRequest, "请求参数有误")
@@ -141,7 +141,7 @@ func LoginHash(c *echo.Context) error {
 }
 
 // Me 当前登录用户。
-func Me(c *echo.Context) error {
+func Me(c *web.Context) error {
 	u, err := models.GetUserByID(middlewares.UserID(c))
 	if err != nil {
 		return helpers.Fail(c, helpers.CodeUnauthorized, "账号不存在")
@@ -156,6 +156,6 @@ func Me(c *echo.Context) error {
 }
 
 // Ping 连通性探测，返回纯文本 pong（不是 JSON 信封）。
-func Ping(c *echo.Context) error {
+func Ping(c *web.Context) error {
 	return c.String(http.StatusOK, "pong")
 }

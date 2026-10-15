@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/labstack/echo/v5"
+	mweb "github.com/azhai/mocca/lib/web"
 )
 
 // Embedded 当前构建是否带管理后台。main 靠它决定要不要挂载 /admin、
@@ -108,7 +108,7 @@ func loadAsset(fsys fs.FS, name string, immutable bool) (*asset, error) {
 // 静态资源（/css/*、/js/*、/logo*.png）由文件服务器从 public 根直接提供：
 // public 就是站点根，所以不需要 StripPrefix；两个页面都用绝对路径引用资源，
 // 于是 / 与 /admin/ 下取到的是同一份文件。
-func Register(e *echo.Echo, prefix string) error {
+func Register(e *mweb.Echo, prefix string) error {
 	// 资源来源：默认 embed，开发期可设 MOCCA_SERVE_DISK 从磁盘读（见 serveFS）。
 	fsys, err := serveFS()
 	if err != nil {
@@ -126,8 +126,8 @@ func Register(e *echo.Echo, prefix string) error {
 	if err != nil {
 		return err
 	}
-	writeHTML := func(body []byte) echo.HandlerFunc {
-		return func(c *echo.Context) error {
+	writeHTML := func(body []byte) mweb.HandlerFunc {
+		return func(c *mweb.Context) error {
 			h := c.Response().Header()
 			h.Set("Content-Type", "text/html; charset=utf-8")
 			// 页面引用的是 /js/home.js 这种固定地址，页面本身被缓存住就会一直
@@ -142,7 +142,7 @@ func Register(e *echo.Echo, prefix string) error {
 	e.GET("/", writeHTML(indexHTML))
 
 	// 后台：不带尾斜杠时重定向到规范入口。
-	e.GET(prefix, func(c *echo.Context) error {
+	e.GET(prefix, func(c *mweb.Context) error {
 		return c.Redirect(http.StatusFound, prefix+"/")
 	})
 	e.GET(prefix+"/", writeHTML(adminHTML))
@@ -150,10 +150,10 @@ func Register(e *echo.Echo, prefix string) error {
 	// index.html 的地址规范到目录形式入口。这原是 http.FileServer 的规范化行为，
 	// 换成自己走 ServeContent 后得显式补上，否则同一份页面会有两个地址、各自可被缓存。
 	// （两个页面都用绝对路径引用资源，所以跳不跳对资源加载都没影响。）
-	e.GET("/index.html", func(c *echo.Context) error {
+	e.GET("/index.html", func(c *mweb.Context) error {
 		return c.Redirect(http.StatusMovedPermanently, "/")
 	})
-	e.GET(prefix+"/index.html", func(c *echo.Context) error {
+	e.GET(prefix+"/index.html", func(c *mweb.Context) error {
 		return c.Redirect(http.StatusMovedPermanently, prefix+"/")
 	})
 
@@ -170,7 +170,7 @@ func Register(e *echo.Echo, prefix string) error {
 	// 根本不影响浏览器里那份旧 JS，前端改了也永远看不到，这是最难查的一类问题。
 	// 补上按内容算的 ETag 后：内容没变回 304（省掉 66KB 的 home.js），变了立刻生效。
 	immutable := !diskMode()
-	e.GET("/*", func(c *echo.Context) error {
+	e.GET("/*", func(c *mweb.Context) error {
 		req := c.Request()
 		if strings.HasSuffix(req.URL.Path, "/") {
 			http.NotFound(c.Response(), req)

@@ -3,9 +3,9 @@ package routes
 import (
 	"github.com/azhai/mocca/config"
 	"github.com/azhai/mocca/handlers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/middlewares"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // SetupAPIRoutes 注册接口。
@@ -17,7 +17,7 @@ import (
 // 管理类接口（存储维护、上传改名、媒体编辑、封面制作、刮削、全局设置、用户管理）
 // 单独放在 SetupAdminRoutes 里，由 AdminRoutes 决定要不要挂：
 // 完整版挂全套，纯 API 版（-tags noweb）一个不挂 —— 见 admin.go 与 build_*.go。
-func SetupAPIRoutes(e *echo.Echo) {
+func SetupAPIRoutes(e *web.Echo) {
 	secret := config.Cfg.JWTSecret
 
 	// 探活：根与 /api 下各挂一个，兼容反向代理剥前缀的部署

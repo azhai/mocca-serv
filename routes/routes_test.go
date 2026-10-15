@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/azhai/mocca/config"
-	"github.com/labstack/echo/v5"
+	web "github.com/azhai/mocca/lib/web"
 )
 
 // requiredRoutes APP（与浏览器浏览端）要用的接口，**两种构建都必须有**。
@@ -55,7 +55,7 @@ var adminRoutes = []string{
 // 不依赖数据库，也不会被中间件的鉴权响应混淆。
 func TestRouteTableMatchesBuild(t *testing.T) {
 	config.Cfg = &config.Config{JWTSecret: "unit-test-secret"}
-	e := echo.New()
+	e := web.New()
 	SetupAPIRoutes(e)
 
 	have := map[string]bool{}

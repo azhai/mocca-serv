@@ -5,7 +5,7 @@ package web
 import (
 	"io/fs"
 
-	"github.com/labstack/echo/v5"
+	mweb "github.com/azhai/mocca/lib/web"
 	"github.com/pkg/errors"
 )
 
@@ -22,4 +22,4 @@ func FS() (fs.FS, error) { return nil, ErrNotEmbedded }
 // 路径一样落到默认 404，不会出现「路由在、页面白屏」这种半死状态。
 //
 // 签名与 embed.go 里的 Register 保持一致，main.go 才能无条件调用它。
-func Register(_ *echo.Echo, _ string) error { return nil }
+func Register(_ *mweb.Echo, _ string) error { return nil }

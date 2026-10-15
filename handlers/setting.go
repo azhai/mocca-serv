@@ -5,9 +5,9 @@ import (
 
 	"github.com/azhai/mocca/config"
 	"github.com/azhai/mocca/helpers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/mediaindex"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // settingDef 一个全局开关的定义：键、展示文案、缺省值、写入后的副作用。
@@ -71,7 +71,7 @@ type SettingOption struct {
 
 // ListSettings 列出全局开关与当前值。缺省值来自 settingDef，
 // 库里没写过该键时返回缺省值（不落库）。
-func ListSettings(c *echo.Context) error {
+func ListSettings(c *web.Context) error {
 	out := make([]SettingOption, 0, len(globalOptions))
 	for _, o := range globalOptions {
 		out = append(out, SettingOption{
@@ -85,7 +85,7 @@ func ListSettings(c *echo.Context) error {
 }
 
 // UpdateSetting 写入单个全局开关。
-func UpdateSetting(c *echo.Context) error {
+func UpdateSetting(c *web.Context) error {
 	var req struct {
 		Key   string `json:"key"`
 		Value bool   `json:"value"`

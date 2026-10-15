@@ -16,12 +16,12 @@ import (
 	"github.com/azhai/mocca/config"
 	"github.com/azhai/mocca/drivers"
 	"github.com/azhai/mocca/helpers"
+	mweb "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/mediaindex"
 	"github.com/azhai/mocca/middlewares"
 	"github.com/azhai/mocca/models"
 	"github.com/azhai/mocca/routes"
 	"github.com/azhai/mocca/web"
-	"github.com/labstack/echo/v5"
 	"github.com/pkg/errors"
 )
 
@@ -111,7 +111,7 @@ func main() {
 		}
 	})
 
-	root := echo.New()
+	root := mweb.New()
 
 	// panic 兜底必须挂在最外层（第一个 Use）：中间件是洋葱模型，
 	// 先注册的包住后面所有中间件与 handler，才接得住最里层抛上来的 panic。
@@ -136,7 +136,7 @@ func main() {
 		log.Printf("纯 API 构建（-tags noweb）：不含管理后台，仅提供 REST API 与 passwd 子命令")
 	}
 
-	// echo v5 的 Echo 只提供 Start，没有 Shutdown；
+	// lib/web 的 Echo 只是一个 http.Handler（无内置 Start/Shutdown），
 	// 包一层自己的 http.Server，超时与优雅关闭就都能掌控。
 	srv := &http.Server{
 		Addr:        cfg.Addr,

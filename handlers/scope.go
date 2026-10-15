@@ -4,9 +4,9 @@ import (
 	"path"
 	"strings"
 
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/middlewares"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 	"github.com/pkg/errors"
 )
 
@@ -18,7 +18,7 @@ const SettingAllowGuest = "allow_guest"
 //   - 未登录：按 allow_guest 开关决定放行或拒绝；
 //   - 普通用户：若配了 base_path，则强制前缀，用户只能看到自己目录下的东西；
 //   - 管理员：不受限。
-func scopePath(c *echo.Context, reqPath string) (string, error) {
+func scopePath(c *web.Context, reqPath string) (string, error) {
 	uid := middlewares.UserID(c)
 	if uid == 0 {
 		if !models.SettingBool(SettingAllowGuest, true) {

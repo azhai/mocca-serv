@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"github.com/azhai/mocca/helpers"
-	"github.com/labstack/echo/v5"
+	web "github.com/azhai/mocca/lib/web"
 )
 
 // UserIDKey 上下文中存放用户 ID 的键。
@@ -12,7 +12,7 @@ const UserIDKey = "user_id"
 
 // tokenFrom 取令牌：客户端把 JWT 直接放进 Authorization 头，
 // 兼容带 Bearer 前缀的写法；播放器还会用 ?token= 传，见 TokenFrom。
-func tokenFrom(c *echo.Context) string {
+func tokenFrom(c *web.Context) string {
 	return TokenFrom(c.Request().Header.Get("Authorization"))
 }
 
@@ -25,9 +25,9 @@ func TokenFrom(header string) string {
 }
 
 // AuthMiddleware 要求登录，未登录或令牌失效返回 401。
-func AuthMiddleware(secret string) echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c *echo.Context) error {
+func AuthMiddleware(secret string) web.MiddlewareFunc {
+	return func(next web.HandlerFunc) web.HandlerFunc {
+		return func(c *web.Context) error {
 			tok := tokenFrom(c)
 			if tok == "" {
 				return helpers.Fail(c, helpers.CodeUnauthorized, "未登录")
@@ -43,9 +43,9 @@ func AuthMiddleware(secret string) echo.MiddlewareFunc {
 }
 
 // OptionalAuth 有令牌就解析，没有也放行（列目录按游客权限处理）。
-func OptionalAuth(secret string) echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c *echo.Context) error {
+func OptionalAuth(secret string) web.MiddlewareFunc {
+	return func(next web.HandlerFunc) web.HandlerFunc {
+		return func(c *web.Context) error {
 			if tok := tokenFrom(c); tok != "" {
 				if claims, err := helpers.ParseToken(secret, tok); err == nil {
 					c.Set(UserIDKey, claims.UserID)
@@ -72,9 +72,9 @@ func OptionalAuth(secret string) echo.MiddlewareFunc {
 // 失败一律用 FailStatus 回真正的 HTTP 状态码：本接口的响应体是要被播放器
 // 当作字节流解析的，回 HTTP 200 + JSON 会让播放器把错误信封当媒体数据去解码，
 // 报出来的错与真实原因毫无关系。
-func StreamAuth(secret string, allowGuest func() bool) echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c *echo.Context) error {
+func StreamAuth(secret string, allowGuest func() bool) web.MiddlewareFunc {
+	return func(next web.HandlerFunc) web.HandlerFunc {
+		return func(c *web.Context) error {
 			tok := tokenFrom(c)
 			if tok == "" {
 				tok = c.QueryParam("token")
@@ -96,7 +96,7 @@ func StreamAuth(secret string, allowGuest func() bool) echo.MiddlewareFunc {
 }
 
 // UserID 取当前用户 ID，未登录返回 0。
-func UserID(c *echo.Context) uint {
+func UserID(c *web.Context) uint {
 	v, _ := c.Get(UserIDKey).(uint)
 	return v
 }

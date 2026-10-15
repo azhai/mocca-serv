@@ -7,15 +7,15 @@ import (
 	"path/filepath"
 	"testing"
 
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // newRecorder 只是 httptest.NewRecorder 的短名，保持测试行短。
 func newRecorder() *httptest.ResponseRecorder { return httptest.NewRecorder() }
 
 // setupProtected 造一个 /media/secret 受密码保护的存储。
-func setupProtected(t *testing.T, e *echo.Echo, admin string) string {
+func setupProtected(t *testing.T, e *web.Echo, admin string) string {
 	t.Helper()
 	root := t.TempDir()
 	writeTestFile(t, root, "open.mp4", "o")

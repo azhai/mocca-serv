@@ -2,8 +2,8 @@ package handlers
 
 import (
 	"github.com/azhai/mocca/helpers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 	"github.com/pkg/errors"
 )
 
@@ -28,7 +28,7 @@ func requireFolderPassword(reqPath, secret string) error {
 // SetFolderPassword 设置或清除目录密码（管理员）。password 为空即清除。
 //
 // 只需给父目录设一次，整棵子树都受保护（见 models.LookupFolderPassword）。
-func SetFolderPassword(c *echo.Context) error {
+func SetFolderPassword(c *web.Context) error {
 	var req struct {
 		Path     string `json:"path"`
 		Password string `json:"password"`
@@ -54,7 +54,7 @@ func SetFolderPassword(c *echo.Context) error {
 //
 // 后台目录树用一次请求就能把「哪些目录带锁」全标出来；逐层问 /folder/status 是 N 次往返。
 // 只回路径清单，不回任何哈希。
-func ListFolderPasswords(c *echo.Context) error {
+func ListFolderPasswords(c *web.Context) error {
 	dirs, err := models.ListFolderPasswords()
 	if err != nil {
 		return helpers.Fail(c, helpers.CodeInternal, "读取目录密码清单失败")
@@ -63,7 +63,7 @@ func ListFolderPasswords(c *echo.Context) error {
 }
 
 // FolderPasswordStatus 查询某路径是否受保护（不泄露哈希）。
-func FolderPasswordStatus(c *echo.Context) error {
+func FolderPasswordStatus(c *web.Context) error {
 	p := c.QueryParam("path")
 	if p == "" {
 		return helpers.Fail(c, helpers.CodeBadRequest, "缺少 path")

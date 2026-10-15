@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // writeTestFile 在 root 下按 rel 写文件，自动建父目录。
@@ -96,4 +96,4 @@ func TestFsMoveRejectsCrossStorage(t *testing.T) {
 	}
 }
 
-var _ = echo.Context{}
+var _ = web.Context{}

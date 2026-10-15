@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/mediaindex"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // fixHash 一个固定但合法的 sha1，测试里据此拼 .mocca 海报/简介路径。
@@ -448,4 +448,4 @@ func TestFsShotWritesFrameAsPoster(t *testing.T) {
 }
 
 // mediaedit_test.go 仅用 helper；占位引用避免未用告警（与 fsops_test 同风格）。
-var _ = echo.Context{}
+var _ = web.Context{}

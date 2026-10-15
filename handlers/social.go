@@ -6,15 +6,15 @@ import (
 
 	"github.com/azhai/mocca/drivers"
 	"github.com/azhai/mocca/helpers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/mediaindex"
 	"github.com/azhai/mocca/middlewares"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 	"github.com/pkg/errors"
 )
 
 // ListFavorites 我的收藏。
-func ListFavorites(c *echo.Context) error {
+func ListFavorites(c *web.Context) error {
 	all, err := models.ListFavorites(middlewares.UserID(c))
 	if err != nil {
 		return helpers.Fail(c, helpers.CodeInternal, "读取收藏失败")
@@ -23,7 +23,7 @@ func ListFavorites(c *echo.Context) error {
 }
 
 // AddFavorite 收藏。重复收藏不会产生第二条记录。
-func AddFavorite(c *echo.Context) error {
+func AddFavorite(c *web.Context) error {
 	var req struct {
 		Path  string `json:"path"`
 		Name  string `json:"name"`
@@ -47,7 +47,7 @@ func AddFavorite(c *echo.Context) error {
 }
 
 // RemoveFavorite 取消收藏。
-func RemoveFavorite(c *echo.Context) error {
+func RemoveFavorite(c *web.Context) error {
 	var req struct {
 		Path string `json:"path"`
 	}
@@ -95,7 +95,7 @@ func sha1OfMedia(drv drivers.Driver, rel string) string {
 
 // danmakuTarget 把「某个媒体的弹幕」解析成 (驱动, sha1)。
 // 出错返回普通 error，由调用方决定映射成哪个响应码。
-func danmakuTarget(c *echo.Context, mediaPath string) (drivers.Driver, string, error) {
+func danmakuTarget(c *web.Context, mediaPath string) (drivers.Driver, string, error) {
 	scoped, err := scopePath(c, mediaPath)
 	if err != nil {
 		return nil, "", err
@@ -120,7 +120,7 @@ func danmakuTarget(c *echo.Context, mediaPath string) (drivers.Driver, string, e
 //
 // 为什么要快照进每条记录：弹幕存在文件里，列表时没有用户表可 join；
 // 而且快照正是要的效果 —— 用户以后改昵称、换头像，历史弹幕仍显示当时的样子。
-func authorSnapshot(c *echo.Context) (uid uint, name, avatar string, err error) {
+func authorSnapshot(c *web.Context) (uid uint, name, avatar string, err error) {
 	uid = middlewares.UserID(c)
 	if uid == 0 {
 		return 0, "", "", errors.New("未登录")
@@ -139,7 +139,7 @@ func isAdmin(uid uint) bool {
 }
 
 // AddDanmaku 发一条弹幕：content + 时间点 offset（毫秒）。
-func AddDanmaku(c *echo.Context) error {
+func AddDanmaku(c *web.Context) error {
 	uid, name, avatar, err := authorSnapshot(c)
 	if err != nil {
 		return helpers.Fail(c, helpers.CodeUnauthorized, err.Error())
@@ -171,7 +171,7 @@ func AddDanmaku(c *echo.Context) error {
 
 // ListDanmaku 取某媒体的弹幕，可按时间轴取窗口：
 // `?from=&to=` 毫秒区间（含端点）；不给就是全部。播放器按当前播放位置滚动取用。
-func ListDanmaku(c *echo.Context) error {
+func ListDanmaku(c *web.Context) error {
 	mediaPath := c.QueryParam("path")
 	if mediaPath == "" {
 		return helpers.Fail(c, helpers.CodeBadRequest, "缺少 path")
@@ -195,7 +195,7 @@ func ListDanmaku(c *echo.Context) error {
 }
 
 // AddComment 发评论；带 parent_id 就是回复某条评论（回复只支持一层）。
-func AddComment(c *echo.Context) error {
+func AddComment(c *web.Context) error {
 	uid, name, avatar, err := authorSnapshot(c)
 	if err != nil {
 		return helpers.Fail(c, helpers.CodeUnauthorized, err.Error())
@@ -226,7 +226,7 @@ func AddComment(c *echo.Context) error {
 }
 
 // ListComments 某媒体的评论：顶层评论按时间正序，每条带它的回复。
-func ListComments(c *echo.Context) error {
+func ListComments(c *web.Context) error {
 	mediaPath := c.QueryParam("path")
 	if mediaPath == "" {
 		return helpers.Fail(c, helpers.CodeBadRequest, "缺少 path")
@@ -245,7 +245,7 @@ func ListComments(c *echo.Context) error {
 }
 
 // DeleteComment 删除自己发的评论/弹幕；管理员可以删任何人的。
-func DeleteComment(c *echo.Context) error {
+func DeleteComment(c *web.Context) error {
 	uid := middlewares.UserID(c)
 	if uid == 0 {
 		return helpers.Fail(c, helpers.CodeUnauthorized, "未登录")
@@ -325,7 +325,7 @@ func socialForDir(dir string, shas map[string]string) map[string]*SocialStat {
 }
 
 // FsSocial 后台看某个媒体的弹幕与评论（全部，不按时间轴窗口筛）。
-func FsSocial(c *echo.Context) error {
+func FsSocial(c *web.Context) error {
 	var req struct {
 		Path string `json:"path"`
 	}
@@ -363,7 +363,7 @@ func FsSocial(c *echo.Context) error {
 //
 // kind **不给默认值**：漏字段就清两类是数据丢失类的坑，宁可报错让人再点一次。
 // 清空是整文件重写，没有回收站；前端二次确认，这里不再多一道询问。
-func FsSocialClear(c *echo.Context) error {
+func FsSocialClear(c *web.Context) error {
 	var req struct {
 		Path string `json:"path"`
 		Kind string `json:"kind"`

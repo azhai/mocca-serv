@@ -8,7 +8,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/labstack/echo/v5"
+	web "github.com/azhai/mocca/lib/web"
 )
 
 // dotEntries 点开头的隐藏项（文件与目录都算），一律不下发。
@@ -83,7 +83,7 @@ func seedMixedDir(t *testing.T, root string) {
 
 // listPage 调 fs/list，返回按**返回顺序**排列的名字、total，
 // 以及 content 是否为 null（APP 拿到 null 会当成缺字段，不能出现）。
-func listPage(t *testing.T, e *echo.Echo, path, token string) (names []string, total int, nullContent bool) {
+func listPage(t *testing.T, e *web.Echo, path, token string) (names []string, total int, nullContent bool) {
 	t.Helper()
 	code, resp := call(t, e, http.MethodPost, "/api/fs/list", `{"path":"`+path+`"}`, token)
 	if code != 200 {

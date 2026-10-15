@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	"github.com/azhai/mocca/helpers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // avatarColors 预设头像的底色，按 key 取模命中：同一个 key 永远同一张图。
@@ -147,7 +147,7 @@ var avatarArts = map[string]avatarArt{
 // 仓库不内置图片素材，这里按 key 现画一张 SVG：
 // 好处是任何合法 key 都能拿到 200，不会因缺素材 404，
 // 也顺带避免了「用户上传头像」带来的存储与越权读取问题。
-func Avatar(c *echo.Context) error {
+func Avatar(c *web.Context) error {
 	key := strings.TrimSuffix(c.Param("key"), ".png")
 	if !models.IsValidAvatar(key) {
 		return helpers.Fail(c, helpers.CodeNotFound, "头像不存在")
@@ -174,7 +174,7 @@ func Avatar(c *echo.Context) error {
 	c.Response().Header().Set("Content-Type", "image/svg+xml")
 	// 头像可能被嵌在页面里：声明不嗅探，避免浏览器把 SVG 当别的类型处理
 	c.Response().Header().Set("X-Content-Type-Options", "nosniff")
-	return c.String(200, svg)
+	return c.String(200, "%s", svg)
 }
 
 // avatarIndex 把 "01".."12" 折算成稳定下标。

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/azhai/mocca/helpers"
-	"github.com/labstack/echo/v5"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/pkg/errors"
 )
 
@@ -24,7 +24,7 @@ type UploadResult struct {
 // （见 UploadOne）——这样浏览器 XHR 的 upload.onprogress 天然给出「每个文件一条进度」；
 // 若把 N 个文件塞进一个请求，只能拿到整体进度，无法分文件显示。
 // 这里保留批量入口是为了兼容一次性提交的场景。
-func Upload(c *echo.Context) error {
+func Upload(c *web.Context) error {
 	dir := c.QueryParam("path")
 	form, err := c.MultipartForm()
 	if err != nil {
@@ -48,7 +48,7 @@ func Upload(c *echo.Context) error {
 }
 
 // UploadOne 单文件上传，前端逐文件并发调用以获得独立进度条。
-func UploadOne(c *echo.Context) error {
+func UploadOne(c *web.Context) error {
 	dir := c.QueryParam("path")
 	form, err := c.MultipartForm()
 	if err != nil {

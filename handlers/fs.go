@@ -23,10 +23,10 @@ import (
 
 	"github.com/azhai/mocca/drivers"
 	"github.com/azhai/mocca/helpers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/mediaindex"
 	"github.com/azhai/mocca/middlewares"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 	"github.com/pkg/errors"
 )
 
@@ -327,7 +327,7 @@ func setStreamContentType(h http.Header, name string) {
 //
 // 注意 no-store 也会让浏览器不缓存这段流：来回拖进度条会重新发请求。
 // 这是刻意的取舍 —— 带凭证的内容优先保证不落缓存。
-func setNoStoreIfCredentialed(c *echo.Context) {
+func setNoStoreIfCredentialed(c *web.Context) {
 	req := c.Request()
 	if req.Header.Get("Authorization") == "" &&
 		c.QueryParam("token") == "" && c.QueryParam("password") == "" {
@@ -341,7 +341,7 @@ func setNoStoreIfCredentialed(c *echo.Context) {
 // 返回的 content 由两部分拼成：
 //  1. 挂载点聚合树给出的虚拟目录（models 内存树，只含挂载点层级，**永远排最前**）；
 //  2. 真实条目 —— 只有路径确实落在某个挂载点之内时，才去读那个存储。
-func FsList(c *echo.Context) error {
+func FsList(c *web.Context) error {
 	var req ListReq
 	if err := c.Bind(&req); err != nil {
 		return helpers.Fail(c, helpers.CodeBadRequest, "请求参数有误")
@@ -664,7 +664,7 @@ func fileRank(t int) int {
 }
 
 // FsGet 取对象详情，raw_url 可直接交给播放器。
-func FsGet(c *echo.Context) error {
+func FsGet(c *web.Context) error {
 	var req GetReq
 	if err := c.Bind(&req); err != nil {
 		return helpers.Fail(c, helpers.CodeBadRequest, "请求参数有误")
@@ -769,7 +769,7 @@ func mediaExtraInfo(drv drivers.Driver, fileRel string) (sha1, summary string, p
 
 // FsInfo 单文件详情增强（悬浮层一次请求拿全）：聚合 .index.jsonl 的 sha1、
 // .mocca 海报/简介，以及数据库里的元数据与全体人员。
-func FsInfo(c *echo.Context) error {
+func FsInfo(c *web.Context) error {
 	var req GetReq
 	if err := c.Bind(&req); err != nil {
 		return helpers.Fail(c, helpers.CodeBadRequest, "请求参数有误")
@@ -819,7 +819,7 @@ func FsInfo(c *echo.Context) error {
 
 // MetaPoster 输出某文件的 .mocca 海报图（PNG）。无海报返回 404。
 // 用 StreamAuth 装配（routes）：令牌可放 ?token=，供 <img> 直接加载。
-func MetaPoster(c *echo.Context) error {
+func MetaPoster(c *web.Context) error {
 	reqPath := c.QueryParam("path")
 	if reqPath == "" {
 		return helpers.FailStatus(c, helpers.CodeBadRequest, "缺少 path")
@@ -863,7 +863,7 @@ func MetaPoster(c *echo.Context) error {
 
 // FsEdit 管理员的「编辑」：可选改名（真改磁盘，只动不含扩展名的部分），
 // 并整体写入附加信息（简介/导演/主演/年份/地区/出品方）。改名时同步迁移元数据。
-func FsEdit(c *echo.Context) error {
+func FsEdit(c *web.Context) error {
 	var req struct {
 		Path       string   `json:"path"`
 		Name       string   `json:"name"` // 不含扩展名的新文件名；空或未变则不移动
@@ -1037,7 +1037,7 @@ func sha1OfRel(drv drivers.Driver, rel string) (string, error) {
 
 // rawURL 拼播放地址：/d/<路径>?token=<当前令牌>。
 // 令牌放查询串是为了照顾不能自定义请求头的播放器。
-func rawURL(c *echo.Context, path string) string {
+func rawURL(c *web.Context, path string) string {
 	q := make(url.Values)
 	if tok := middlewares.TokenFrom(c.Request().Header.Get("Authorization")); tok != "" {
 		q.Set("token", tok)
@@ -1057,7 +1057,7 @@ func ensureLeadingSlash(p string) string {
 }
 
 // FsRemove 删除文件或目录（管理员）。目录会递归删除，调用方需自行确认。
-func FsRemove(c *echo.Context) error {
+func FsRemove(c *web.Context) error {
 	var req GetReq
 	if err := c.Bind(&req); err != nil || req.Path == "" {
 		return helpers.Fail(c, helpers.CodeBadRequest, "请求参数有误")
@@ -1076,7 +1076,7 @@ func FsRemove(c *echo.Context) error {
 
 // FsCov 上传替换音/视频封面（管理员）。写入该文件 sha1 对应的 .mocca 海报位置，
 // 覆盖旧图；网格与悬浮层读 /meta/poster 时会直接看到新图。需先执行索引生成 .index.jsonl。
-func FsCov(c *echo.Context) error {
+func FsCov(c *web.Context) error {
 	reqPath := c.QueryParam("path")
 	if reqPath == "" {
 		reqPath = c.FormValue("path")
@@ -1137,7 +1137,7 @@ func FsCov(c *echo.Context) error {
 // 与「上传封面」「FFmpeg 截图」相对：那两条路是**替换**封面，这条是把封面清掉、
 // 回到"没有封面"的状态（之后重新刮削就会重新取 TMDB 海报，因为海报文件已不存在）。
 // 同样依赖 .index.jsonl 定位 sha1 —— 封面按 sha1 寻址。
-func FsUncov(c *echo.Context) error {
+func FsUncov(c *web.Context) error {
 	var req GetReq
 	if err := c.Bind(&req); err != nil || req.Path == "" {
 		req.Path = c.QueryParam("path")
@@ -1239,7 +1239,7 @@ func normalizeShotSec(s string) string {
 	return s
 }
 
-func FsShot(c *echo.Context) error {
+func FsShot(c *web.Context) error {
 	var req ShotReq
 	// JSON body 优先；query/form 兜底（旧调用方/测试用 ?path= 与 ?sec=）
 	if err := c.Bind(&req); err != nil || req.Path == "" {
@@ -1318,7 +1318,7 @@ type PatchReq struct {
 
 // FsPatch 目录级补充截图：启动扫描不再自动抽封面，缺封面的视频在这里集中补齐。
 // 遍历该目录 .index.jsonl，跳过已有封面的，给仍缺封面的视频调 ffmpeg 并写 .mocca 海报。
-func FsPatch(c *echo.Context) error {
+func FsPatch(c *web.Context) error {
 	var req PatchReq
 	if err := c.Bind(&req); err != nil || req.Path == "" {
 		req.Path = c.QueryParam("path")
@@ -1428,7 +1428,7 @@ type HlsReq struct {
 //
 // 一次只处理一个文件：后台「视频切分」页对多选逐个发请求，各自报进度，
 // 某个失败也不会牵连其余。已有的清单默认跳过，force=true 才重切。
-func FsHLS(c *echo.Context) error {
+func FsHLS(c *web.Context) error {
 	var req HlsReq
 	if err := c.Bind(&req); err != nil || req.Path == "" {
 		req.Path = c.QueryParam("path")
@@ -1494,7 +1494,7 @@ type ReindexReq struct {
 //
 // 多选时按目录归拢：同一个目录只重写一次索引（写入在 mediaindex 里另有 indexMu 串行化，
 // 这里不依赖它防重复）。回包 `files` = 写进索引的记录数，`rehashed` = 其中真正重算了 sha1 的条数。
-func FsReindex(c *echo.Context) error {
+func FsReindex(c *web.Context) error {
 	var req ReindexReq
 	if err := c.Bind(&req); err != nil {
 		req.Path = c.QueryParam("path")
@@ -1615,7 +1615,7 @@ type exportFile struct {
 // 分成"预检"与"流式写出"两段：一旦开始写响应体，就再也没法改回 JSON 错误信封，所以路径
 // 解析、驱动打开、存在性探测全在写头之前做完。中途单文件读失败只能中断下载（前面写出的是
 // 合法的 tar.gz 前缀，客户端表现为包不完整）。
-func FsExport(c *echo.Context) error {
+func FsExport(c *web.Context) error {
 	var req ExportReq
 	if err := c.Bind(&req); err != nil {
 		req.Path = c.QueryParam("path")
@@ -1762,7 +1762,7 @@ func writeTarFile(tw *tar.Writer, f exportFile, mod time.Time) error {
 }
 
 // FsRename 同目录改名（管理员）。
-func FsRename(c *echo.Context) error {
+func FsRename(c *web.Context) error {
 	var req struct {
 		Path string `json:"path"`
 		Name string `json:"name"`
@@ -1786,7 +1786,7 @@ func FsRename(c *echo.Context) error {
 //
 // 移动是「同一存储内的 rename」，跨存储没有廉价实现（需要整份复制再删），
 // 所以这里直接拦掉，避免用户以为移动成功、实际是慢速拷贝。
-func FsMove(c *echo.Context) error {
+func FsMove(c *web.Context) error {
 	var req struct {
 		Path   string `json:"path"`
 		DstDir string `json:"dst_dir"`
@@ -1820,7 +1820,7 @@ func FsMove(c *echo.Context) error {
 
 // downloadPath 取通配段。echo v5 的 /d/*path 按实现不同，
 // 通配段可能落在 "path" 或 "*" 上，这里都试一遍，不绑死某个版本细节。
-func downloadPath(c *echo.Context) string {
+func downloadPath(c *web.Context) string {
 	for _, key := range []string{"path", "*", "path*"} {
 		if v := c.Param(key); v != "" {
 			return v
@@ -1834,7 +1834,7 @@ func downloadPath(c *echo.Context) string {
 // 注意这里的失败一律走 FailStatus（回真实 HTTP 状态码）：本接口的响应体
 // 会被播放器直接当成媒体字节流解析，若失败也回 HTTP 200 + JSON 信封，
 // 播放器只会报「格式不支持」这类与真实原因无关的错。
-func Download(c *echo.Context) error {
+func Download(c *web.Context) error {
 	// 放在最前面：handler 自己产出的失败响应（如文件不存在的 404）也要带上这条指令。
 	// 404 正属于 RFC 9111 里「默认可被启发式缓存」的状态码，不标就会留在中间节点上。
 	// （令牌无效时由 StreamAuth 提前回 401，根本走不到这里；401 不在那个清单里。）

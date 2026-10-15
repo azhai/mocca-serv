@@ -3,8 +3,8 @@ package routes
 import (
 	"github.com/azhai/mocca/config"
 	"github.com/azhai/mocca/handlers"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/middlewares"
-	"github.com/labstack/echo/v5"
 )
 
 // SetupAdminRoutes 注册管理类接口（管理员令牌才能用）。
@@ -18,7 +18,7 @@ import (
 //
 // 把路由表放在一个函数里而不是按标签拆两份，是为了避免"改了这边忘了那边"：
 // 路由清单只有一份，差异只是一个布尔。
-func SetupAdminRoutes(e *echo.Echo) {
+func SetupAdminRoutes(e *web.Echo) {
 	secret := config.Cfg.JWTSecret
 	api := e.Group(config.APIBaseURL)
 	admin := api.Group("", middlewares.AdminMiddleware(secret))

@@ -11,9 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/mediaindex"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // avatarTopColor 从头像 SVG 里取出渐变上段的颜色。
@@ -34,7 +34,7 @@ func pwdHash(plain string) string { return models.StaticHash(plain) }
 
 // makeUser 直接建账号并返回登录后的令牌；role 用 models.RoleAdmin 可造管理员。
 // 口令与真实客户端一致：库里存 bcrypt(StaticHash(明文))，登录发 StaticHash(明文)。
-func makeUser(t *testing.T, e *echo.Echo, name, pw string, role int) string {
+func makeUser(t *testing.T, e *web.Echo, name, pw string, role int) string {
 	t.Helper()
 	pwd := pwdHash(pw)
 	u := &models.User{Username: name, Role: role}

@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/azhai/mocca/config"
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/models"
-	"github.com/labstack/echo/v5"
 )
 
 // TestSeededAdminCanLogin 端到端：用配置里的口令播种出来的 admin 必须能真的登进后台。
@@ -64,7 +64,7 @@ func TestSeededAdminBlocksFirstUserPromotion(t *testing.T) {
 }
 
 // adminToken 播种管理员并登录，返回令牌。供需要管理员权限的用例复用。
-func adminToken(t *testing.T, e *echo.Echo) string {
+func adminToken(t *testing.T, e *web.Echo) string {
 	t.Helper()
 	if _, err := models.EnsureAdmin(config.Cfg.AdminPassword); err != nil {
 		t.Fatal(err)

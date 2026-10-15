@@ -8,15 +8,15 @@ import (
 	"testing"
 	"time"
 
+	web "github.com/azhai/mocca/lib/web"
 	"github.com/azhai/mocca/middlewares"
-	"github.com/labstack/echo/v5"
 )
 
 // newEcho 挂一个受 BodyLimit 保护的回显接口。
-func newEcho(limit int64) *echo.Echo {
-	e := echo.New()
+func newEcho(limit int64) *web.Echo {
+	e := web.New()
 	e.Use(middlewares.BodyLimit(limit))
-	e.POST("/echo", func(c *echo.Context) error {
+	e.POST("/echo", func(c *web.Context) error {
 		return c.JSON(200, map[string]any{"ok": true})
 	})
 	return e
@@ -55,9 +55,9 @@ func TestBodyLimitAllowsNormalBody(t *testing.T) {
 }
 
 func TestRequestLoggerPassesThrough(t *testing.T) {
-	e := echo.New()
+	e := web.New()
 	e.Use(middlewares.RequestLogger(50 * time.Millisecond))
-	e.GET("/ok", func(c *echo.Context) error { return c.String(200, "ok") })
+	e.GET("/ok", func(c *web.Context) error { return c.String(200, "ok") })
 
 	req := httptest.NewRequest(http.MethodGet, "/ok", nil)
 	rec := httptest.NewRecorder()
